@@ -1,0 +1,191 @@
+2025-09-15 23:22:26,887 - werkzeug - WARNING -  * Debugger is active!
+2025-09-15 23:22:26,951 - werkzeug - INFO -  * Debugger PIN: 732-061-178
+2025-09-15 23:22:43,789 - werkzeug - INFO -  * Detected change in '/Users/pasith/DevFlutter/crypto_trading_system/crypto_trading_backend/src/main.py', reloading
+2025-09-15 23:22:44,869 - werkzeug - WARNING -  * Debugger is active!
+2025-09-15 23:22:44,905 - werkzeug - INFO -  * Debugger PIN: 732-061-178
+2025-09-15 23:27:21,070 - werkzeug - INFO - [31m[1mWARNING: This is a development server. Do not use it in a production deployment. Use a production WSGI server instead.[0m
+ * Running on all addresses (0.0.0.0)
+ * Running on http://127.0.0.1:5001
+ * Running on http://192.168.1.30:5001
+2025-09-15 23:27:21,071 - werkzeug - INFO - [33mPress CTRL+C to quit[0m
+2025-09-15 23:27:21,073 - werkzeug - INFO -  * Restarting with stat
+2025-09-15 23:27:21,898 - werkzeug - WARNING -  * Debugger is active!
+2025-09-15 23:27:21,945 - werkzeug - INFO -  * Debugger PIN: 732-061-178
+2025-09-15 23:27:41,855 - werkzeug - INFO - 127.0.0.1 - - [15/Sep/2025 23:27:41] "GET /api/crypto/top-gainers HTTP/1.1" 200 -
+2025-09-15 23:27:51,479 - werkzeug - INFO - 127.0.0.1 - - [15/Sep/2025 23:27:51] "POST /api/crypto/selected HTTP/1.1" 200 -
+2025-09-15 23:28:18,246 - werkzeug - INFO - 127.0.0.1 - - [15/Sep/2025 23:28:18] "POST /api/crypto/selected HTTP/1.1" 200 -
+2025-09-21 19:17:57,046 - werkzeug - INFO - [31m[1mWARNING: This is a development server. Do not use it in a production deployment. Use a production WSGI server instead.[0m
+ * Running on all addresses (0.0.0.0)
+ * Running on http://127.0.0.1:5001
+ * Running on http://192.168.1.17:5001
+2025-09-21 19:17:57,046 - werkzeug - INFO - [33mPress CTRL+C to quit[0m
+2025-09-21 19:17:57,049 - werkzeug - INFO -  * Restarting with stat
+2025-09-21 19:17:58,660 - werkzeug - WARNING -  * Debugger is active!
+2025-09-21 19:17:58,691 - werkzeug - INFO -  * Debugger PIN: 732-061-178
+2025-09-21 20:23:47,324 - werkzeug - INFO - [31m[1mWARNING: This is a development server. Do not use it in a production deployment. Use a production WSGI server instead.[0m
+ * Running on all addresses (0.0.0.0)
+ * Running on http://127.0.0.1:5001
+ * Running on http://192.168.1.17:5001
+2025-09-21 20:23:47,325 - werkzeug - INFO - [33mPress CTRL+C to quit[0m
+2025-09-21 20:23:47,327 - werkzeug - INFO -  * Restarting with stat
+2025-09-21 20:23:48,174 - werkzeug - WARNING -  * Debugger is active!
+2025-09-21 20:23:48,187 - werkzeug - INFO -  * Debugger PIN: 732-061-178
+2025-09-21 20:30:04,767 - src.routes.binance_trading - ERROR - Failed to initialize Binance Futures client: There is no current event loop in thread 'Thread-2'.
+2025-09-21 20:30:04,773 - werkzeug - INFO - 127.0.0.1 - - [21/Sep/2025 20:30:04] "[31m[1mPOST /api/binance/config HTTP/1.1[0m" 400 -
+2025-09-21 22:47:25,284 - werkzeug - INFO -  * Detected change in '/Users/pasith/DevFlutter/crypto_trading_system/crypto_trading_backend/src/routes/binance_trading.py', reloading
+2025-09-21 22:47:25,471 - werkzeug - INFO -  * Restarting with stat
+2025-09-21 22:47:27,425 - werkzeug - WARNING -  * Debugger is active!
+2025-09-21 22:47:27,446 - werkzeug - INFO -  * Debugger PIN: 732-061-178
+2025-09-21 22:47:35,924 - werkzeug - INFO -  * Detected change in '/Users/pasith/DevFlutter/crypto_trading_system/crypto_trading_backend/src/routes/binance_trading.py', reloading
+2025-09-21 22:47:36,066 - werkzeug - INFO -  * Restarting with stat
+2025-09-21 22:47:37,255 - werkzeug - WARNING -  * Debugger is active!
+2025-09-21 22:47:37,271 - werkzeug - INFO -  * Debugger PIN: 732-061-178
+2025-09-21 22:47:54,233 - werkzeug - INFO -  * Detected change in '/Users/pasith/DevFlutter/crypto_trading_system/crypto_trading_backend/src/routes/binance_trading.py', reloading
+2025-09-21 22:47:54,342 - werkzeug - INFO -  * Restarting with stat
+2025-09-21 22:47:55,561 - werkzeug - WARNING -  * Debugger is active!
+2025-09-21 22:47:55,573 - werkzeug - INFO -  * Debugger PIN: 732-061-178
+2025-09-21 22:48:30,269 - werkzeug - INFO -  * Detected change in '/Users/pasith/DevFlutter/crypto_trading_system/crypto_trading_backend/src/routes/binance_trading.py', reloading
+2025-09-21 22:48:30,389 - werkzeug - INFO -  * Restarting with stat
+2025-09-21 22:48:31,925 - werkzeug - WARNING -  * Debugger is active!
+2025-09-21 22:48:31,938 - werkzeug - INFO -  * Debugger PIN: 732-061-178
+2025-09-21 22:55:37,608 - src.routes.binance_trading - INFO - Initializing Binance client (testnet: False)
+2025-09-21 22:55:37,610 - src.routes.binance_trading - ERROR - Failed to initialize Binance Futures client: There is no current event loop in thread 'Thread-2'.
+2025-09-21 22:55:37,612 - werkzeug - INFO - 127.0.0.1 - - [21/Sep/2025 22:55:37] "[31m[1mPOST /api/binance/config HTTP/1.1[0m" 400 -
+2025-09-21 22:57:12,990 - src.routes.binance_trading - INFO - Initializing Binance client (testnet: False)
+2025-09-21 22:57:12,997 - src.routes.binance_trading - ERROR - Failed to initialize Binance Futures client: There is no current event loop in thread 'Thread-3'.
+2025-09-21 22:57:12,998 - werkzeug - INFO - 127.0.0.1 - - [21/Sep/2025 22:57:12] "[31m[1mPOST /api/binance/config HTTP/1.1[0m" 400 -
+2025-09-21 23:03:20,876 - werkzeug - INFO - [31m[1mWARNING: This is a development server. Do not use it in a production deployment. Use a production WSGI server instead.[0m
+ * Running on all addresses (0.0.0.0)
+ * Running on http://127.0.0.1:5001
+ * Running on http://192.168.1.17:5001
+2025-09-21 23:03:20,876 - werkzeug - INFO - [33mPress CTRL+C to quit[0m
+2025-09-21 23:03:20,878 - werkzeug - INFO -  * Restarting with stat
+2025-09-21 23:03:21,787 - werkzeug - WARNING -  * Debugger is active!
+2025-09-21 23:03:21,803 - werkzeug - INFO -  * Debugger PIN: 732-061-178
+2025-09-21 23:03:44,162 - src.routes.binance_trading - INFO - Testing credentials (testnet: True)
+2025-09-21 23:03:44,164 - werkzeug - INFO - 127.0.0.1 - - [21/Sep/2025 23:03:44] "[31m[1mPOST /api/binance/validate-credentials HTTP/1.1[0m" 400 -
+2025-09-21 23:13:55,087 - src.routes.binance_trading - INFO - Testing credentials (testnet: True)
+2025-09-21 23:13:55,096 - werkzeug - INFO - 127.0.0.1 - - [21/Sep/2025 23:13:55] "[31m[1mPOST /api/binance/validate-credentials HTTP/1.1[0m" 400 -
+2025-09-21 23:14:34,116 - src.routes.binance_trading - INFO - Testing credentials (testnet: True)
+2025-09-21 23:14:34,124 - werkzeug - INFO - 127.0.0.1 - - [21/Sep/2025 23:14:34] "[31m[1mPOST /api/binance/validate-credentials HTTP/1.1[0m" 400 -
+2025-09-21 23:19:25,248 - src.routes.binance_trading - INFO - Initializing Binance client (testnet: True)
+2025-09-21 23:19:25,254 - src.routes.binance_trading - ERROR - Failed to initialize Binance Futures client: There is no current event loop in thread 'Thread-5'.
+2025-09-21 23:19:25,255 - werkzeug - INFO - 127.0.0.1 - - [21/Sep/2025 23:19:25] "[31m[1mPOST /api/binance/config HTTP/1.1[0m" 400 -
+2025-09-22 21:18:07,860 - src.routes.binance_trading - INFO - Initializing Binance client (testnet: True)
+2025-09-22 21:18:07,868 - src.routes.binance_trading - ERROR - Failed to initialize Binance Futures client: There is no current event loop in thread 'Thread-6'.
+2025-09-22 21:18:07,872 - werkzeug - INFO - 127.0.0.1 - - [22/Sep/2025 21:18:07] "[31m[1mPOST /api/binance/config HTTP/1.1[0m" 400 -
+2025-09-22 21:18:58,588 - src.routes.binance_trading - INFO - Initializing Binance client (testnet: True)
+2025-09-22 21:18:58,595 - src.routes.binance_trading - ERROR - Failed to initialize Binance Futures client: There is no current event loop in thread 'Thread-7'.
+2025-09-22 21:18:58,596 - werkzeug - INFO - 127.0.0.1 - - [22/Sep/2025 21:18:58] "[31m[1mPOST /api/binance/config HTTP/1.1[0m" 400 -
+2025-09-22 22:46:08,096 - werkzeug - INFO -  * Detected change in '/Users/pasith/DevFlutter/crypto_trading_system/crypto_trading_backend/src/routes/tradingview.py', reloading
+2025-09-22 22:46:08,534 - werkzeug - INFO -  * Restarting with stat
+2025-09-22 22:46:10,742 - werkzeug - WARNING -  * Debugger is active!
+2025-09-22 22:46:10,762 - werkzeug - INFO -  * Debugger PIN: 732-061-178
+2025-09-22 22:46:21,293 - werkzeug - INFO -  * Detected change in '/Users/pasith/DevFlutter/crypto_trading_system/crypto_trading_backend/src/routes/tradingview.py', reloading
+2025-09-22 22:46:21,474 - werkzeug - INFO -  * Restarting with stat
+2025-09-22 22:46:22,766 - werkzeug - WARNING -  * Debugger is active!
+2025-09-22 22:46:22,781 - werkzeug - INFO -  * Debugger PIN: 732-061-178
+2025-09-22 22:46:41,656 - werkzeug - INFO -  * Detected change in '/Users/pasith/DevFlutter/crypto_trading_system/crypto_trading_backend/src/routes/tradingview.py', reloading
+2025-09-22 22:46:41,808 - werkzeug - INFO -  * Restarting with stat
+2025-09-22 22:46:43,016 - werkzeug - WARNING -  * Debugger is active!
+2025-09-22 22:46:43,031 - werkzeug - INFO -  * Debugger PIN: 732-061-178
+2025-09-22 22:46:47,370 - werkzeug - INFO -  * Detected change in '/Users/pasith/DevFlutter/crypto_trading_system/crypto_trading_backend/src/routes/tradingview.py', reloading
+2025-09-22 22:46:47,521 - werkzeug - INFO -  * Restarting with stat
+2025-09-22 22:46:48,821 - werkzeug - WARNING -  * Debugger is active!
+2025-09-22 22:46:48,834 - werkzeug - INFO -  * Debugger PIN: 732-061-178
+2025-09-22 22:46:59,406 - werkzeug - INFO -  * Detected change in '/Users/pasith/DevFlutter/crypto_trading_system/crypto_trading_backend/src/routes/tradingview.py', reloading
+2025-09-22 22:46:59,562 - werkzeug - INFO -  * Restarting with stat
+2025-09-22 22:47:00,765 - werkzeug - WARNING -  * Debugger is active!
+2025-09-22 22:47:00,781 - werkzeug - INFO -  * Debugger PIN: 732-061-178
+2025-09-22 22:47:13,369 - werkzeug - INFO -  * Detected change in '/Users/pasith/DevFlutter/crypto_trading_system/crypto_trading_backend/src/routes/tradingview.py', reloading
+2025-09-22 22:47:13,526 - werkzeug - INFO -  * Restarting with stat
+2025-09-22 22:47:14,567 - werkzeug - WARNING -  * Debugger is active!
+2025-09-22 22:47:14,581 - werkzeug - INFO -  * Debugger PIN: 732-061-178
+2025-09-22 22:47:39,700 - werkzeug - INFO -  * Detected change in '/Users/pasith/DevFlutter/crypto_trading_system/crypto_trading_backend/src/routes/tradingview.py', reloading
+2025-09-22 22:47:39,887 - werkzeug - INFO -  * Restarting with stat
+2025-09-22 22:47:41,457 - werkzeug - WARNING -  * Debugger is active!
+2025-09-22 22:47:41,470 - werkzeug - INFO -  * Debugger PIN: 732-061-178
+2025-09-22 22:49:11,915 - werkzeug - INFO -  * Detected change in '/Users/pasith/DevFlutter/crypto_trading_system/crypto_trading_backend/src/routes/tradingview.py', reloading
+2025-09-22 22:49:12,038 - werkzeug - INFO -  * Restarting with stat
+2025-09-22 22:49:13,589 - werkzeug - WARNING -  * Debugger is active!
+2025-09-22 22:49:13,601 - werkzeug - INFO -  * Debugger PIN: 732-061-178
+2025-09-22 22:50:58,389 - werkzeug - INFO -  * Detected change in '/Users/pasith/DevFlutter/crypto_trading_system/crypto_trading_backend/src/routes/tradingview.py', reloading
+2025-09-22 22:50:58,511 - werkzeug - INFO -  * Restarting with stat
+2025-09-22 22:51:00,082 - werkzeug - WARNING -  * Debugger is active!
+2025-09-22 22:51:00,098 - werkzeug - INFO -  * Debugger PIN: 732-061-178
+2025-09-22 23:13:02,935 - werkzeug - INFO -  * Detected change in '/Users/pasith/DevFlutter/crypto_trading_system/crypto_trading_backend/src/routes/tradingview.py', reloading
+2025-09-22 23:13:03,181 - werkzeug - INFO -  * Restarting with stat
+2025-09-22 23:13:05,153 - werkzeug - WARNING -  * Debugger is active!
+2025-09-22 23:13:05,168 - werkzeug - INFO -  * Debugger PIN: 732-061-178
+2025-09-22 23:13:15,753 - werkzeug - INFO -  * Detected change in '/Users/pasith/DevFlutter/crypto_trading_system/crypto_trading_backend/src/routes/tradingview.py', reloading
+2025-09-22 23:13:15,905 - werkzeug - INFO -  * Restarting with stat
+2025-09-22 23:13:17,452 - werkzeug - WARNING -  * Debugger is active!
+2025-09-22 23:13:17,465 - werkzeug - INFO -  * Debugger PIN: 732-061-178
+2025-09-22 23:13:23,861 - werkzeug - INFO -  * Detected change in '/Users/pasith/DevFlutter/crypto_trading_system/crypto_trading_backend/src/routes/tradingview.py', reloading
+2025-09-22 23:13:24,041 - werkzeug - INFO -  * Restarting with stat
+2025-09-22 23:13:25,340 - werkzeug - WARNING -  * Debugger is active!
+2025-09-22 23:13:25,360 - werkzeug - INFO -  * Debugger PIN: 732-061-178
+2025-09-22 23:13:32,766 - werkzeug - INFO -  * Detected change in '/Users/pasith/DevFlutter/crypto_trading_system/crypto_trading_backend/src/routes/tradingview.py', reloading
+2025-09-22 23:13:32,913 - werkzeug - INFO -  * Restarting with stat
+2025-09-22 23:13:34,241 - werkzeug - WARNING -  * Debugger is active!
+2025-09-22 23:13:34,254 - werkzeug - INFO -  * Debugger PIN: 732-061-178
+2025-09-22 23:14:36,269 - werkzeug - INFO -  * Detected change in '/Users/pasith/DevFlutter/crypto_trading_system/crypto_trading_backend/src/routes/tradingview.py', reloading
+2025-09-22 23:14:36,389 - werkzeug - INFO -  * Restarting with stat
+2025-09-22 23:14:37,826 - werkzeug - WARNING -  * Debugger is active!
+2025-09-22 23:14:37,849 - werkzeug - INFO -  * Debugger PIN: 732-061-178
+2025-09-22 23:56:02,960 - werkzeug - INFO -  * Detected change in '/Users/pasith/DevFlutter/crypto_trading_system/crypto_trading_backend/src/routes/tradingview.py', reloading
+2025-09-22 23:56:03,125 - werkzeug - INFO -  * Restarting with stat
+2025-09-22 23:56:05,190 - werkzeug - WARNING -  * Debugger is active!
+2025-09-22 23:56:05,205 - werkzeug - INFO -  * Debugger PIN: 732-061-178
+2025-09-22 23:56:26,273 - werkzeug - INFO -  * Detected change in '/Users/pasith/DevFlutter/crypto_trading_system/crypto_trading_backend/src/routes/tradingview.py', reloading
+2025-09-22 23:56:26,407 - werkzeug - INFO -  * Restarting with stat
+2025-09-22 23:56:27,936 - werkzeug - WARNING -  * Debugger is active!
+2025-09-22 23:56:27,947 - werkzeug - INFO -  * Debugger PIN: 732-061-178
+2025-09-22 23:56:47,932 - werkzeug - INFO -  * Detected change in '/Users/pasith/DevFlutter/crypto_trading_system/crypto_trading_backend/src/routes/tradingview.py', reloading
+2025-09-22 23:56:48,122 - werkzeug - INFO -  * Restarting with stat
+2025-09-22 23:56:49,764 - werkzeug - WARNING -  * Debugger is active!
+2025-09-22 23:56:49,779 - werkzeug - INFO -  * Debugger PIN: 732-061-178
+2025-09-22 23:57:02,363 - werkzeug - INFO -  * Detected change in '/Users/pasith/DevFlutter/crypto_trading_system/crypto_trading_backend/src/routes/tradingview.py', reloading
+2025-09-22 23:57:02,580 - werkzeug - INFO -  * Restarting with stat
+2025-09-22 23:57:04,105 - werkzeug - WARNING -  * Debugger is active!
+2025-09-22 23:57:04,120 - werkzeug - INFO -  * Debugger PIN: 732-061-178
+2025-09-22 23:57:10,472 - werkzeug - INFO -  * Detected change in '/Users/pasith/DevFlutter/crypto_trading_system/crypto_trading_backend/src/routes/tradingview.py', reloading
+2025-09-22 23:57:10,600 - werkzeug - INFO -  * Restarting with stat
+2025-09-22 23:57:11,650 - werkzeug - WARNING -  * Debugger is active!
+2025-09-22 23:57:11,662 - werkzeug - INFO -  * Debugger PIN: 732-061-178
+2025-09-22 23:57:25,323 - werkzeug - INFO -  * Detected change in '/Users/pasith/DevFlutter/crypto_trading_system/crypto_trading_backend/src/routes/tradingview.py', reloading
+2025-09-22 23:57:25,455 - werkzeug - INFO -  * Restarting with stat
+2025-09-22 23:57:26,443 - werkzeug - WARNING -  * Debugger is active!
+2025-09-22 23:57:26,455 - werkzeug - INFO -  * Debugger PIN: 732-061-178
+2025-09-22 23:57:33,865 - werkzeug - INFO -  * Detected change in '/Users/pasith/DevFlutter/crypto_trading_system/crypto_trading_backend/src/routes/tradingview.py', reloading
+2025-09-22 23:57:33,977 - werkzeug - INFO -  * Restarting with stat
+2025-09-22 23:57:35,237 - werkzeug - WARNING -  * Debugger is active!
+2025-09-22 23:57:35,288 - werkzeug - INFO -  * Debugger PIN: 732-061-178
+2025-09-22 23:57:45,804 - werkzeug - INFO -  * Detected change in '/Users/pasith/DevFlutter/crypto_trading_system/crypto_trading_backend/src/routes/tradingview.py', reloading
+2025-09-22 23:57:45,934 - werkzeug - INFO -  * Restarting with stat
+2025-09-22 23:57:47,075 - werkzeug - WARNING -  * Debugger is active!
+2025-09-22 23:57:47,091 - werkzeug - INFO -  * Debugger PIN: 732-061-178
+2025-09-22 23:57:57,643 - werkzeug - INFO -  * Detected change in '/Users/pasith/DevFlutter/crypto_trading_system/crypto_trading_backend/src/routes/tradingview.py', reloading
+2025-09-22 23:57:57,776 - werkzeug - INFO -  * Restarting with stat
+2025-09-22 23:57:59,038 - werkzeug - WARNING -  * Debugger is active!
+2025-09-22 23:57:59,050 - werkzeug - INFO -  * Debugger PIN: 732-061-178
+2025-09-22 23:58:05,391 - werkzeug - INFO -  * Detected change in '/Users/pasith/DevFlutter/crypto_trading_system/crypto_trading_backend/src/routes/tradingview.py', reloading
+2025-09-22 23:58:05,517 - werkzeug - INFO -  * Restarting with stat
+2025-09-22 23:58:06,758 - werkzeug - WARNING -  * Debugger is active!
+2025-09-22 23:58:06,769 - werkzeug - INFO -  * Debugger PIN: 732-061-178
+2025-09-22 23:58:17,301 - werkzeug - INFO -  * Detected change in '/Users/pasith/DevFlutter/crypto_trading_system/crypto_trading_backend/src/routes/tradingview.py', reloading
+2025-09-22 23:58:17,423 - werkzeug - INFO -  * Restarting with stat
+2025-09-22 23:58:18,605 - werkzeug - WARNING -  * Debugger is active!
+2025-09-22 23:58:18,617 - werkzeug - INFO -  * Debugger PIN: 732-061-178
+2025-09-22 23:58:36,446 - werkzeug - INFO -  * Detected change in '/Users/pasith/DevFlutter/crypto_trading_system/crypto_trading_backend/src/routes/tradingview.py', reloading
+2025-09-22 23:58:36,623 - werkzeug - INFO -  * Restarting with stat
+2025-09-22 23:58:38,439 - werkzeug - WARNING -  * Debugger is active!
+2025-09-22 23:58:38,467 - werkzeug - INFO -  * Debugger PIN: 732-061-178
+2025-09-22 23:58:48,023 - werkzeug - INFO -  * Detected change in '/Users/pasith/DevFlutter/crypto_trading_system/crypto_trading_backend/src/routes/tradingview.py', reloading
+2025-09-22 23:58:48,172 - werkzeug - INFO -  * Restarting with stat
+2025-09-22 23:58:49,300 - werkzeug - WARNING -  * Debugger is active!
+2025-09-22 23:58:49,313 - werkzeug - INFO -  * Debugger PIN: 732-061-178
+2025-09-22 23:59:32,305 - werkzeug - INFO -  * Detected change in '/Users/pasith/DevFlutter/crypto_trading_system/crypto_trading_backend/src/routes/tradingview.py', reloading
+2025-09-22 23:59:32,443 - werkzeug - INFO -  * Restarting with stat
+2025-09-22 23:59:33,836 - werkzeug - WARNING -  * Debugger is active!
+2025-09-22 23:59:33,849 - werkzeug - INFO -  * Debugger PIN: 732-061-178

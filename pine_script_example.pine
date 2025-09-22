@@ -1,0 +1,70 @@
+//@version=5
+strategy("TradingView to Binance TP/SL Strategy", overlay=true)
+
+// ===================== STRATEGY INPUTS =====================
+// Entry conditions
+rsiLength = input.int(14, "RSI Length", minval=1)
+rsiOverbought = input.int(70, "RSI Overbought", minval=50, maxval=100)
+rsiOversold = input.int(30, "RSI Oversold", minval=0, maxval=50)
+
+// Risk Management
+tpPercent = input.float(2.0, "Take Profit %", minval=0.1, maxval=10.0)
+slPercent = input.float(1.0, "Stop Loss %", minval=0.1, maxval=5.0)
+quantity = input.float(0.001, "Trade Quantity", minval=0.0001)
+
+// Webhook settings
+webhookUrl = input.string("https://your-domain.com/api/tradingview/webhook", "Webhook URL")
+enableWebhook = input.bool(true, "Enable Webhook Trading")
+
+// ===================== STRATEGY LOGIC =====================
+// Calculate RSI
+rsi = ta.rsi(close, rsiLength)
+
+// Entry conditions
+longCondition = ta.crossover(rsi, rsiOversold) and close > ta.sma(close, 50)
+shortCondition = ta.crossunder(rsi, rsiOverbought) and close < ta.sma(close, 50)
+
+// ===================== WEBHOOK ALERTS =====================
+
+// Long Entry Alert
+if longCondition and enableWebhook
+    // Calculate exact TP/SL prices
+    entryPrice = close
+    takeProfitPrice = entryPrice * (1 + tpPercent / 100)
+    stopLossPrice = entryPrice * (1 - slPercent / 100)
+    
+    // Create JSON payload for webhook
+    alertMessage = '{"symbol":"' + str.replace(syminfo.ticker, "USD", "USDT") + '","action":"buy","price":' + str.tostring(entryPrice) + ',"tp":' + str.tostring(takeProfitPrice) + ',"sl":' + str.tostring(stopLossPrice) + ',"quantity":' + str.tostring(quantity) + ',"message":"Long entry signal from Pine Script"}'
+    
+    alert(alertMessage, alert.freq_once_per_bar_close)
+
+// Short Entry Alert  
+if shortCondition and enableWebhook
+    // Calculate exact TP/SL prices for short
+    entryPrice = close
+    takeProfitPrice = entryPrice * (1 - tpPercent / 100)
+    stopLossPrice = entryPrice * (1 + slPercent / 100)
+    
+    // Create JSON payload for webhook
+    alertMessage = '{"symbol":"' + str.replace(syminfo.ticker, "USD", "USDT") + '","action":"sell","price":' + str.tostring(entryPrice) + ',"tp":' + str.tostring(takeProfitPrice) + ',"sl":' + str.tostring(stopLossPrice) + ',"quantity":' + str.tostring(quantity) + ',"message":"Short entry signal from Pine Script"}'
+    
+    alert(alertMessage, alert.freq_once_per_bar_close)
+
+// ===================== VISUAL INDICATORS =====================
+// Plot RSI for reference
+hline(rsiOverbought, "Overbought", color=color.red)
+hline(rsiOversold, "Oversold", color=color.green)
+hline(50, "Midline", color=color.gray)
+
+// Plot entry signals
+plotshape(longCondition, "Long Signal", shape.triangleup, location.belowbar, color.green, size=size.small)
+plotshape(shortCondition, "Short Signal", shape.triangledown, location.abovebar, color.red, size=size.small)
+
+// ===================== STRATEGY ORDERS (for backtesting) =====================
+if longCondition
+    strategy.entry("Long", strategy.long)
+    strategy.exit("Long TP/SL", "Long", profit=close * tpPercent / 100, loss=close * slPercent / 100)
+
+if shortCondition
+    strategy.entry("Short", strategy.short)
+    strategy.exit("Short TP/SL", "Short", profit=close * tpPercent / 100, loss=close * slPercent / 100)

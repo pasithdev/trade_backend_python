@@ -1,0 +1,280 @@
+//@version=5
+strategy("Advanced Binance TP/SL Strategy", overlay=true, max_bars_back=500)
+
+// ===================== INPUTS =====================
+// Strategy Selection
+strategyType = input.string("RSI + MA", "Strategy Type", options=["RSI + MA", "Bollinger Bands", "MACD + RSI", "Support/Resistance"])
+
+// RSI Settings
+rsiLength = input.int(14, "RSI Length", minval=1, group="RSI Settings")
+rsiOverbought = input.int(70, "RSI Overbought", minval=50, maxval=100, group="RSI Settings")
+rsiOversold = input.int(30, "RSI Oversold", minval=0, maxval=50, group="RSI Settings")
+
+// Moving Average Settings
+maLength = input.int(50, "MA Length", minval=1, group="Moving Average")
+maType = input.string("SMA", "MA Type", options=["SMA", "EMA"], group="Moving Average")
+
+// Bollinger Bands Settings
+bbLength = input.int(20, "BB Length", minval=1, group="Bollinger Bands")
+bbMult = input.float(2.0, "BB Multiplier", minval=0.1, group="Bollinger Bands")
+
+// MACD Settings
+macdFast = input.int(12, "MACD Fast", minval=1, group="MACD Settings")
+macdSlow = input.int(26, "MACD Slow", minval=1, group="MACD Settings")
+macdSignal = input.int(9, "MACD Signal", minval=1, group="MACD Settings")
+
+// Risk Management
+riskType = input.string("Percentage", "TP/SL Type", options=["Percentage", "ATR", "Fixed Points"], group="Risk Management")
+tpPercent = input.float(2.0, "Take Profit %", minval=0.1, maxval=10.0, group="Risk Management")
+slPercent = input.float(1.0, "Stop Loss %", minval=0.1, maxval=5.0, group="Risk Management")
+atrLength = input.int(14, "ATR Length", minval=1, group="Risk Management")
+atrMultTp = input.float(3.0, "ATR TP Multiplier", minval=0.1, group="Risk Management")
+atrMultSl = input.float(1.5, "ATR SL Multiplier", minval=0.1, group="Risk Management")
+fixedTpPoints = input.int(100, "Fixed TP Points", minval=1, group="Risk Management")
+fixedSlPoints = input.int(50, "Fixed SL Points", minval=1, group="Risk Management")
+
+// Position Settings
+quantity = input.float(0.001, "Base Quantity", minval=0.0001, group="Position Management")
+usePercentBalance = input.bool(false, "Use % of Balance", group="Position Management")
+percentBalance = input.float(10.0, "% of Balance", minval=1.0, maxval=100.0, group="Position Management")
+
+// Webhook Settings
+webhookUrl = input.string("https://your-domain.com/api/tradingview/webhook", "Webhook URL", group="Webhook")
+enableWebhook = input.bool(true, "Enable Webhook", group="Webhook")
+testMode = input.bool(true, "Test Mode (Paper Trading)", group="Webhook")
+
+// Time Filter
+useTimeFilter = input.bool(false, "Use Time Filter", group="Time Filter")
+startTime = input.time(timestamp("2023-01-01 00:00:00"), "Start Time", group="Time Filter")
+endTime = input.time(timestamp("2023-12-31 23:59:59"), "End Time", group="Time Filter")
+
+// ===================== CALCULATIONS =====================
+
+// Time filter
+timeFilter = useTimeFilter ? (time >= startTime and time <= endTime) : true
+
+// Technical Indicators
+rsi = ta.rsi(close, rsiLength)
+sma = ta.sma(close, maLength)
+ema = ta.ema(close, maLength)
+ma = maType == "SMA" ? sma : ema
+
+// Bollinger Bands
+bbBasis = ta.sma(close, bbLength)
+bbDev = bbMult * ta.stdev(close, bbLength)
+bbUpper = bbBasis + bbDev
+bbLower = bbBasis - bbDev
+
+// MACD
+[macdLine, signalLine, histLine] = ta.macd(close, macdFast, macdSlow, macdSignal)
+
+// ATR for dynamic TP/SL
+atr = ta.atr(atrLength)
+
+// Support/Resistance (simplified)
+highestHigh = ta.highest(high, 20)
+lowestLow = ta.lowest(low, 20)
+resistance = highestHigh[1]
+support = lowestLow[1]
+
+// ===================== STRATEGY CONDITIONS =====================
+
+var bool longCondition = false
+var bool shortCondition = false
+
+if strategyType == "RSI + MA"
+    longCondition := ta.crossover(rsi, rsiOversold) and close > ma and timeFilter
+    shortCondition := ta.crossunder(rsi, rsiOverbought) and close < ma and timeFilter
+
+else if strategyType == "Bollinger Bands"
+    longCondition := ta.crossover(close, bbLower) and rsi < 50 and timeFilter
+    shortCondition := ta.crossunder(close, bbUpper) and rsi > 50 and timeFilter
+
+else if strategyType == "MACD + RSI" 
+    longCondition := ta.crossover(macdLine, signalLine) and rsi < 60 and close > ma and timeFilter
+    shortCondition := ta.crossunder(macdLine, signalLine) and rsi > 40 and close < ma and timeFilter
+
+else if strategyType == "Support/Resistance"
+    longCondition := ta.crossover(close, support) and rsi < 70 and timeFilter
+    shortCondition := ta.crossunder(close, resistance) and rsi > 30 and timeFilter
+
+// ===================== TP/SL CALCULATION =====================
+
+calcTPSL(entryPrice, isLong) =>
+    var float tpPrice = na
+    var float slPrice = na
+    
+    if riskType == "Percentage"
+        if isLong
+            tpPrice := entryPrice * (1 + tpPercent / 100)
+            slPrice := entryPrice * (1 - slPercent / 100)
+        else
+            tpPrice := entryPrice * (1 - tpPercent / 100)
+            slPrice := entryPrice * (1 + slPercent / 100)
+            
+    else if riskType == "ATR"
+        if isLong
+            tpPrice := entryPrice + (atr * atrMultTp)
+            slPrice := entryPrice - (atr * atrMultSl)
+        else
+            tpPrice := entryPrice - (atr * atrMultTp)
+            slPrice := entryPrice + (atr * atrMultSl)
+            
+    else if riskType == "Fixed Points"
+        tickSize = syminfo.mintick
+        if isLong
+            tpPrice := entryPrice + (fixedTpPoints * tickSize)
+            slPrice := entryPrice - (fixedSlPoints * tickSize)
+        else
+            tpPrice := entryPrice - (fixedTpPoints * tickSize)
+            slPrice := entryPrice + (fixedSlPoints * tickSize)
+    
+    [tpPrice, slPrice]
+
+// Calculate position size
+calcQuantity() =>
+    if usePercentBalance
+        // This is simplified - in real trading you'd get actual balance
+        quantity * (percentBalance / 10.0)
+    else
+        quantity
+
+// ===================== WEBHOOK EXECUTION =====================
+
+sendWebhookAlert(action, entryPrice, tpPrice, slPrice) =>
+    if enableWebhook
+        // Convert symbol format for Binance
+        binanceSymbol = str.replace(syminfo.ticker, "USD", "USDT")
+        
+        // Calculate final quantity
+        finalQuantity = calcQuantity()
+        
+        // Create comprehensive JSON payload
+        alertData = '{'
+        alertData += '"symbol":"' + binanceSymbol + '",'
+        alertData += '"action":"' + action + '",'
+        alertData += '"price":' + str.tostring(entryPrice) + ','
+        alertData += '"tp":' + str.tostring(tpPrice) + ','
+        alertData += '"sl":' + str.tostring(slPrice) + ','
+        alertData += '"quantity":' + str.tostring(finalQuantity) + ','
+        alertData += '"strategy":"' + strategyType + '",'
+        alertData += '"risk_type":"' + riskType + '",'
+        alertData += '"test_mode":' + (testMode ? "true" : "false") + ','
+        alertData += '"timestamp":"' + str.tostring(time) + '",'
+        alertData += '"timeframe":"' + timeframe.period + '",'
+        alertData += '"rsi":' + str.tostring(rsi) + ','
+        alertData += '"atr":' + str.tostring(atr) + ','
+        alertData += '"message":"' + action + ' signal from ' + strategyType + ' strategy"'
+        alertData += '}'
+        
+        alert(alertData, alert.freq_once_per_bar_close)
+
+// ===================== STRATEGY EXECUTION =====================
+
+// Long Entry
+if longCondition
+    entryPrice = close
+    [tpPrice, slPrice] = calcTPSL(entryPrice, true)
+    
+    sendWebhookAlert("buy", entryPrice, tpPrice, slPrice)
+    
+    // For backtesting
+    strategy.entry("Long", strategy.long, qty=calcQuantity())
+    strategy.exit("Long Exit", "Long", limit=tpPrice, stop=slPrice)
+
+// Short Entry
+if shortCondition
+    entryPrice = close
+    [tpPrice, slPrice] = calcTPSL(entryPrice, false)
+    
+    sendWebhookAlert("sell", entryPrice, tpPrice, slPrice)
+    
+    // For backtesting
+    strategy.entry("Short", strategy.short, qty=calcQuantity())
+    strategy.exit("Short Exit", "Short", limit=tpPrice, stop=slPrice)
+
+// ===================== VISUAL ELEMENTS =====================
+
+// Plot indicators based on selected strategy
+if strategyType == "RSI + MA"
+    plot(ma, "Moving Average", color=color.blue, linewidth=2)
+    
+else if strategyType == "Bollinger Bands"
+    plot(bbBasis, "BB Basis", color=color.blue)
+    plot(bbUpper, "BB Upper", color=color.red)
+    plot(bbLower, "BB Lower", color=color.green)
+    
+else if strategyType == "Support/Resistance"
+    plot(resistance, "Resistance", color=color.red, linewidth=2, style=plot.style_line)
+    plot(support, "Support", color=color.green, linewidth=2, style=plot.style_line)
+
+// Entry signals
+plotshape(longCondition, "Long Signal", shape.triangleup, location.belowbar, 
+          color=color.new(color.green, 0), size=size.normal, text="BUY")
+plotshape(shortCondition, "Short Signal", shape.triangledown, location.abovebar, 
+          color=color.new(color.red, 0), size=size.normal, text="SELL")
+
+// TP/SL Lines (for current bar)
+var line longTpLine = na
+var line longSlLine = na
+var line shortTpLine = na
+var line shortSlLine = na
+
+if longCondition
+    entryPrice = close
+    [tpPrice, slPrice] = calcTPSL(entryPrice, true)
+    
+    if not na(longTpLine)
+        line.delete(longTpLine)
+    if not na(longSlLine)
+        line.delete(longSlLine)
+        
+    longTpLine := line.new(bar_index, tpPrice, bar_index + 10, tpPrice, 
+                          color=color.green, style=line.style_dashed, width=2)
+    longSlLine := line.new(bar_index, slPrice, bar_index + 10, slPrice, 
+                          color=color.red, style=line.style_dashed, width=2)
+
+if shortCondition
+    entryPrice = close
+    [tpPrice, slPrice] = calcTPSL(entryPrice, false)
+    
+    if not na(shortTpLine)
+        line.delete(shortTpLine)
+    if not na(shortSlLine)
+        line.delete(shortSlLine)
+        
+    shortTpLine := line.new(bar_index, tpPrice, bar_index + 10, tpPrice, 
+                           color=color.green, style=line.style_dashed, width=2)
+    shortSlLine := line.new(bar_index, slPrice, bar_index + 10, slPrice, 
+                           color=color.red, style=line.style_dashed, width=2)
+
+// ===================== TABLE DISPLAY =====================
+// Display current settings and status
+var table infoTable = table.new(position.top_right, 2, 8, bgcolor=color.white, border_width=1)
+
+if barstate.islast
+    table.cell(infoTable, 0, 0, "Strategy:", text_color=color.black, bgcolor=color.gray)
+    table.cell(infoTable, 1, 0, strategyType, text_color=color.black)
+    
+    table.cell(infoTable, 0, 1, "Risk Type:", text_color=color.black, bgcolor=color.gray)
+    table.cell(infoTable, 1, 1, riskType, text_color=color.black)
+    
+    table.cell(infoTable, 0, 2, "TP/SL %:", text_color=color.black, bgcolor=color.gray)
+    table.cell(infoTable, 1, 2, str.tostring(tpPercent) + "/" + str.tostring(slPercent), text_color=color.black)
+    
+    table.cell(infoTable, 0, 3, "Webhook:", text_color=color.black, bgcolor=color.gray)
+    table.cell(infoTable, 1, 3, enableWebhook ? "ON" : "OFF", 
+               text_color=enableWebhook ? color.green : color.red)
+    
+    table.cell(infoTable, 0, 4, "Test Mode:", text_color=color.black, bgcolor=color.gray)
+    table.cell(infoTable, 1, 4, testMode ? "ON" : "OFF", 
+               text_color=testMode ? color.orange : color.green)
+    
+    table.cell(infoTable, 0, 5, "Current RSI:", text_color=color.black, bgcolor=color.gray)
+    table.cell(infoTable, 1, 5, str.tostring(math.round(rsi, 2)), text_color=color.black)
+    
+    table.cell(infoTable, 0, 6, "ATR:", text_color=color.black, bgcolor=color.gray)
+    table.cell(infoTable, 1, 6, str.tostring(math.round(atr, 4)), text_color=color.black)
+    
+    table.cell(infoTable, 0, 7, "Quantity:", text_color=color.black, bgcolor=color.gray)
+    table.cell(infoTable, 1, 7, str.tostring(calcQuantity()), text_color=color.black)
