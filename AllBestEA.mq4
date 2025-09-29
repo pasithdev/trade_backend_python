@@ -9,7 +9,7 @@
 #property strict
 
 //--- Input parameters
-input string SignalsDirectory = "mt4_signals"; // Signals directory path (relative to MQL4\Files\)
+input string SignalsDirectory = "/Users/pasith/DevFlutter/crypto_trading_system/crypto_trading_backend/mt4_signals/"; // Signals directory path (relative to MQL4\Files\)
 input double DefaultLotSize = 0.01;             // Default lot size if not specified in signal
 input double MaxLotSize = 1.0;                  // Maximum allowed lot size
 input int MagicNumber = 123456;                 // Magic number for orders

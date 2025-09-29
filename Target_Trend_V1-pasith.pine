@@ -1,0 +1,175 @@
+// This work is licensed under Creative Commons Attribution-NonCommercial-ShareAlike 4.0 International  
+// https://creativecommons.org/licenses/by-nc-sa/4.0/
+// © BigBeluga
+
+//@version=5
+strategy("Target Trend Strategy [BigBeluga]", overlay = true, max_lines_count = 40, default_qty_type=strategy.percent_of_equity, default_qty_value=20)
+
+// ＩＮＰＵＴＳ ――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――{
+length = input.int(10, "Trend Length")
+target = input.int(0, "Set Targets")
+
+// Binance Webhook Settings
+quantity = input.float(0.20, "Order Quantity (% of equity)", minval=0.01, maxval=1.0, step=0.01, group="Binance Settings")
+leverage = input.int(10, "Leverage", minval=1, maxval=125, group="Binance Settings")
+
+// Use current chart symbol dynamically
+symbol = syminfo.ticker
+// }
+
+
+// ＶＡＲＩＡＢＬＥＳ ――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――{
+var bool trend    = na
+float trend_value = na
+
+// Colors
+color up_color = #06b690
+color dn_color = color.rgb(182, 112, 6)
+
+// ATR for calculating stop loss and target levels
+series float atr_value = ta.sma(ta.atr(200), 200) * 0.8
+
+// Moving averages for trend detection
+series float sma_high  = ta.sma(high, length) + atr_value
+series float sma_low   = ta.sma(low, length) - atr_value
+color       plot_color = color.new(chart.fg_color, 80)
+
+// UDT for managing lines and labels
+type TrendTargets
+    line[] lines
+    label[] labels
+
+// Initialize UDT
+var TrendTargets targets_up   = TrendTargets.new(array.new_line(), array.new_label())
+var TrendTargets targets_down = TrendTargets.new(array.new_line(), array.new_label())
+// }
+
+
+// ＣＡＬＣＵＬＡＴＩＯＮＳ――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――{
+  
+// Determine trend based on crossovers
+if ta.crossover(close, sma_high) and barstate.isconfirmed
+    trend := true
+if ta.crossunder(close, sma_low) and barstate.isconfirmed
+    trend := false
+
+trend_value := switch
+    trend     => sma_low
+    not trend => sma_high
+
+trend_color = trend ? up_color : not trend ? dn_color : na
+
+
+// Signal detection for trend changes
+bool signal_up   = ta.change(trend) and not trend[1]
+bool signal_down = ta.change(trend) and trend[1]
+
+// Calculate entry level
+float entry_price = close
+
+// Strategy Orders - Buy and Sell Entries
+if signal_up and barstate.isconfirmed
+    strategy.entry("Long", strategy.long, qty=quantity)
+
+if signal_down and barstate.isconfirmed
+    strategy.entry("Short", strategy.short, qty=quantity)
+
+// JSON Alert Messages for Binance Webhook
+buy_alert_message = '{"action": "buy", "symbol": "' + symbol + '", "quantity": "' + str.tostring(quantity) + '", "leverage": "' + str.tostring(leverage) + '", "entry": "' + str.tostring(math.round(entry_price, 8)) + '"}'
+
+sell_alert_message = '{"action": "sell", "symbol": "' + symbol + '", "quantity": "' + str.tostring(quantity) + '", "leverage": "' + str.tostring(leverage) + '", "entry": "' + str.tostring(math.round(entry_price, 8)) + '"}'
+
+
+// Method to draw entry signals only
+method draw_signals(TrendTargets targets, bool signal1, bool signal2, bool direction)=>
+    if signal1
+        // Clear existing lines and labels
+        for line_i in targets.lines
+            int i = targets.lines.indexof(line_i)
+            label.delete(targets.labels.get(i))
+            line.delete(line_i)
+
+        array.clear(targets.lines)
+        array.clear(targets.labels)
+
+        // Draw entry line only
+        line entry_line = line.new(bar_index, close, bar_index + 20, close)
+
+        // Draw signal label
+        label entry_label = label.new(bar_index + 20, close, (direction ? "BUY: " : "SELL: ") + str.tostring(math.round(close, 2)))
+
+        // Push line and label to the UDT
+        targets.lines.push(entry_line)
+        targets.labels.push(entry_label)
+
+        // Update styles
+        entry_line.set_color(direction ? up_color : dn_color)
+        entry_label.set_style(label.style_label_left)
+        entry_label.set_color(chart.fg_color)
+        entry_label.set_textcolor(chart.bg_color)
+
+    if signal2
+        // Clear existing lines and labels
+        for line_i in targets.lines
+            int i = targets.lines.indexof(line_i)
+            label.delete(targets.labels.get(i))
+            line.delete(line_i)
+
+        array.clear(targets.lines)
+        array.clear(targets.labels)
+
+    // Update line positions
+    if not targets.lines.size() == 0
+        line  entry_line  = targets.lines.first()
+        label entry_label = targets.labels.first()
+
+        // Update line positions
+        if direction ? trend : not trend
+            entry_line.set_x2(bar_index + 20)
+            entry_label.set_x(bar_index + 20)
+            entry_line.set_style(line.style_solid)
+            entry_line.set_color(direction ? up_color : dn_color)
+            entry_label.set_textcolor(#1d80dd)
+// }
+
+// ＰＬＯＴ―――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――{
+// Call the draw_signals method for both upward and downward trends
+targets_down.draw_signals(signal_down, signal_up, false)
+targets_up.draw_signals(signal_up, signal_down, true)
+
+// Plot candlesticks with trend color
+plotcandle(open, high, low, close,
+           title = 'Title', 
+           color = trend_color,
+           wickcolor = trend_color, 
+           bordercolor = trend_color)
+
+// Plot trailing stops
+p1 = plot(trend ? trend_value : na, style = plot.style_linebr, color = plot_color)
+p2 = plot(not trend ? trend_value : na, style = plot.style_linebr, color = plot_color)
+p0 = plot(hl2, display = display.none, editable = false)
+fill(p1, p0, trend_value, hl2, color.new(chart.fg_color, 90), na)
+fill(p2, p0, trend_value, hl2, color.new(chart.fg_color, 90), na)
+
+// Plot signals on the chart
+float sigUp = signal_up ? low - atr_value*2 : na
+float sigDn = signal_down ? high + atr_value*2 : na
+
+plotshape(sigUp,   "", shape.triangleup, location.absolute, up_color, size = size.tiny)
+plotshape(sigUp,   "", shape.triangleup, location.absolute, color.new(up_color, 80), size = size.small)
+
+plotshape(sigDn, "", shape.triangledown, location.absolute, dn_color, size = size.tiny)
+plotshape(sigDn, "", shape.triangledown, location.absolute, color.new(dn_color, 80), size = size.small)
+
+// Alert Conditions for Binance Webhook
+alertcondition(signal_up, title="Long Signal", message="{{strategy.order.action}}")
+alertcondition(signal_down, title="Short Signal", message="{{strategy.order.action}}")
+
+// Custom Alert Messages
+if signal_up and barstate.isconfirmed
+    alert(buy_alert_message, alert.freq_once_per_bar)
+    
+if signal_down and barstate.isconfirmed
+    alert(sell_alert_message, alert.freq_once_per_bar)
+
+// }

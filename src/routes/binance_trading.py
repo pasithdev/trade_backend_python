@@ -33,7 +33,18 @@ def init_binance_client(api_key, api_secret, testnet=True):
     """Initialize Binance client with API credentials for Futures trading"""
     global binance_client
     try:
+        import asyncio
+        import threading
+        
         logger.info(f"Initializing Binance client (testnet: {testnet})")
+        
+        # Fix event loop issue for Flask threading
+        try:
+            loop = asyncio.get_event_loop()
+        except RuntimeError:
+            # Create new event loop if none exists
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
         
         if testnet:
             # For testnet, we need to specify the testnet base URL
@@ -843,6 +854,728 @@ def webhook_trade():
             'success': False,
             'error': f'Webhook trade error: {str(e)}'
         }), 500
+
+def close_opposite_position(symbol, new_action):
+    """
+    Close any existing opposite position for the given symbol before opening new position
+    new_action: 'buy' for long, 'sell' for short
+    """
+    global binance_client
+    
+    if not binance_client:
+        return {'success': False, 'error': 'Binance client not configured'}
+    
+    try:
+        logger.info(f"Checking for opposite positions to close for {symbol} before {new_action}")
+        
+        # Get current positions for the symbol
+        positions = binance_client.futures_position_information(symbol=symbol)
+        
+        for position in positions:
+            position_amt = float(position['positionAmt'])
+            
+            # Skip if no position
+            if position_amt == 0:
+                continue
+            
+            # Determine if we need to close this position
+            should_close = False
+            close_side = None
+            close_quantity = abs(position_amt)
+            
+            if new_action == 'buy' and position_amt < 0:  # Closing short position before buy
+                should_close = True
+                close_side = 'BUY'
+                logger.info(f"Found short position {position_amt} for {symbol}, will close before buy")
+            elif new_action == 'sell' and position_amt > 0:  # Closing long position before sell
+                should_close = True
+                close_side = 'SELL' 
+                logger.info(f"Found long position {position_amt} for {symbol}, will close before sell")
+            
+            if should_close:
+                # Close the position
+                close_order = binance_client.futures_create_order(
+                    symbol=symbol,
+                    side=close_side,
+                    type='MARKET',
+                    quantity=close_quantity,
+                    reduceOnly=True
+                )
+                logger.info(f"Closed opposite position: {close_side} {close_quantity} {symbol} - Order ID: {close_order['orderId']}")
+                
+                # Cancel any existing orders for this symbol to avoid conflicts
+                try:
+                    existing_orders = binance_client.futures_get_open_orders(symbol=symbol)
+                    for order in existing_orders:
+                        binance_client.futures_cancel_order(symbol=symbol, orderId=order['orderId'])
+                        logger.info(f"Cancelled existing order {order['orderId']} for {symbol}")
+                except Exception as cancel_error:
+                    logger.warning(f"Error cancelling existing orders for {symbol}: {cancel_error}")
+                
+                return {
+                    'success': True, 
+                    'message': f'Closed opposite position {close_side} {close_quantity} {symbol}',
+                    'closed_order': close_order
+                }
+        
+        logger.info(f"No opposite positions found for {symbol} - proceeding with {new_action}")
+        return {'success': True, 'message': 'No opposite positions to close'}
+        
+    except BinanceAPIException as e:
+        logger.error(f"Binance API error while closing opposite position: {e.message}")
+        return {'success': False, 'error': f'Binance API error: {e.message}'}
+    except Exception as e:
+        logger.error(f"Error closing opposite position: {str(e)}")
+        return {'success': False, 'error': f'Error closing opposite position: {str(e)}'}
+
+def calculate_position_quantity(symbol, balance_percentage=0.20, leverage=10):
+    """
+    Calculate position quantity based on account balance percentage
+    
+    Args:
+        symbol: Trading symbol (e.g., 'BTCUSDT')
+        balance_percentage: Percentage of balance to use (default 20% = 0.20)
+        leverage: Leverage multiplier (default 10x)
+    
+    Returns:
+        dict: {'success': bool, 'quantity': float, 'details': dict}
+    """
+    global binance_client
+    
+    try:
+        logger.info(f"Calculating position quantity for {symbol} using {balance_percentage*100}% of balance with {leverage}x leverage")
+        
+        # Step 1: Get account balance
+        account_info = binance_client.futures_account()
+        total_balance = float(account_info['totalWalletBalance'])
+        available_balance = float(account_info['availableBalance'])
+        
+        logger.info(f"Account balance - Total: {total_balance} USDT, Available: {available_balance} USDT")
+        
+        # Step 2: Calculate position size in USDT
+        position_value_usdt = available_balance * balance_percentage * leverage
+        
+        logger.info(f"Position value: {available_balance} * {balance_percentage} * {leverage} = {position_value_usdt} USDT")
+        
+        # Step 3: Get current market price
+        ticker = binance_client.futures_symbol_ticker(symbol=symbol)
+        current_price = float(ticker['price'])
+        
+        logger.info(f"Current {symbol} price: {current_price}")
+        
+        # Step 4: Calculate quantity
+        raw_quantity = position_value_usdt / current_price
+        
+        # Step 5: Get symbol precision info for rounding
+        exchange_info = binance_client.futures_exchange_info()
+        symbol_info = next(s for s in exchange_info['symbols'] if s['symbol'] == symbol)
+        lot_size_filter = next(f for f in symbol_info['filters'] if f['filterType'] == 'LOT_SIZE')
+        step_size = float(lot_size_filter['stepSize'])
+        
+        # Round quantity to appropriate precision
+        final_quantity = round(raw_quantity - (raw_quantity % step_size), 8)
+        
+        logger.info(f"Quantity calculation: {position_value_usdt} USDT / {current_price} = {raw_quantity} -> rounded to {final_quantity}")
+        
+        # Step 6: Validate minimum quantity
+        min_qty = float(lot_size_filter['minQty'])
+        if final_quantity < min_qty:
+            return {
+                'success': False,
+                'error': f'Calculated quantity {final_quantity} is below minimum {min_qty} for {symbol}',
+                'details': {
+                    'calculated_quantity': final_quantity,
+                    'minimum_quantity': min_qty,
+                    'position_value_usdt': position_value_usdt,
+                    'current_price': current_price
+                }
+            }
+        
+        return {
+            'success': True,
+            'quantity': final_quantity,
+            'details': {
+                'total_balance': total_balance,
+                'available_balance': available_balance,
+                'balance_percentage': balance_percentage,
+                'leverage': leverage,
+                'position_value_usdt': position_value_usdt,
+                'current_price': current_price,
+                'raw_quantity': raw_quantity,
+                'final_quantity': final_quantity,
+                'step_size': step_size
+            }
+        }
+        
+    except Exception as e:
+        logger.error(f"Error calculating position quantity: {str(e)}")
+        return {
+            'success': False,
+            'error': f'Failed to calculate position quantity: {str(e)}',
+            'details': {}
+        }
+
+def handle_close_position(symbol):
+    """
+    Handle close position signals from pine script
+    Close any existing long positions for the symbol
+    """
+    global binance_client
+    
+    if not binance_client:
+        return jsonify({
+            'success': False,
+            'error': 'Binance client not configured'
+        }), 400
+    
+    try:
+        logger.info(f"Processing close signal for {symbol}")
+        
+        # Get current positions for the symbol
+        positions = binance_client.futures_position_information(symbol=symbol)
+        closed_positions = []
+        
+        for position in positions:
+            position_amt = float(position['positionAmt'])
+            
+            # Only close long positions
+            if position_amt > 0:
+                close_quantity = position_amt
+                
+                # Close the long position
+                close_order = binance_client.futures_create_order(
+                    symbol=symbol,
+                    side='SELL',
+                    type='MARKET',
+                    quantity=close_quantity,
+                    reduceOnly=True
+                )
+                
+                closed_positions.append({
+                    'quantity': close_quantity,
+                    'order_id': close_order.get('orderId'),
+                    'side': 'SELL'
+                })
+                
+                logger.info(f"Closed long position: SELL {close_quantity} {symbol} - Order ID: {close_order['orderId']}")
+        
+        # Cancel any existing orders for this symbol
+        try:
+            existing_orders = binance_client.futures_get_open_orders(symbol=symbol)
+            cancelled_orders = []
+            for order in existing_orders:
+                binance_client.futures_cancel_order(symbol=symbol, orderId=order['orderId'])
+                cancelled_orders.append(order['orderId'])
+                logger.info(f"Cancelled existing order {order['orderId']} for {symbol}")
+        except Exception as cancel_error:
+            logger.warning(f"Error cancelling existing orders for {symbol}: {cancel_error}")
+            cancelled_orders = []
+        
+        if not closed_positions:
+            return jsonify({
+                'success': True,
+                'message': f'No long positions to close for {symbol}',
+                'symbol': symbol,
+                'action': 'close',
+                'closed_positions': [],
+                'cancelled_orders': cancelled_orders,
+                'timestamp': datetime.now().isoformat()
+            })
+        
+        # Store close trade record
+        trade_record = {
+            'timestamp': datetime.now().isoformat(),
+            'source': 'target_trend_v1_pine_script_close',
+            'symbol': symbol,
+            'action': 'close',
+            'closed_positions': closed_positions,
+            'cancelled_orders': cancelled_orders,
+            'status': 'completed'
+        }
+        
+        active_orders.append(trade_record)
+        
+        return jsonify({
+            'success': True,
+            'message': f'Closed {len(closed_positions)} long position(s) for {symbol}',
+            'symbol': symbol,
+            'action': 'close',
+            'closed_positions': closed_positions,
+            'cancelled_orders': cancelled_orders,
+            'total_closed': len(closed_positions),
+            'timestamp': datetime.now().isoformat()
+        })
+        
+    except BinanceAPIException as e:
+        logger.error(f"Binance API error while closing positions: {e.message}")
+        return jsonify({
+            'success': False,
+            'error': f'Binance API error: {e.message}'
+        }), 400
+    except Exception as e:
+        logger.error(f"Error closing positions: {str(e)}")
+        return jsonify({
+            'success': False,
+            'error': f'Error closing positions: {str(e)}'
+        }), 500
+
+@binance_bp.route('/binance/target-trend-webhook', methods=['POST'])
+@binance_bp.route('/tradingview/binancebinance/target-trend-webhook', methods=['POST'])  # Handle TradingView alert URL
+def target_trend_webhook():
+    """
+    Webhook endpoint specifically for Target_Trend_V1 pine script
+    Handles buy/sell signals with multiple take profit levels
+    Closes opposite positions before opening new ones
+    """
+    global binance_client, active_orders
+    
+    if not binance_client:
+        return jsonify({
+            'success': False,
+            'error': 'Binance client not configured. Please configure API credentials first.'
+        }), 400
+    
+    try:
+        # Get the webhook data from pine script
+        data = request.get_json()
+        
+        if not data:
+            return jsonify({
+                'success': False,
+                'error': 'No webhook data received from pine script'
+            }), 400
+        
+        # Extract parameters from dual direction pine script alert
+        symbol = str(data.get('symbol', '')).upper()
+        action = str(data.get('action', '')).lower()
+        quantity = float(data.get('quantity', 0))
+        leverage = int(data.get('leverage', trading_config['leverage']))
+        entry_price = float(data.get('entry', 0))
+        
+        # Validate required parameters
+        if not symbol or action not in ['buy', 'sell']:
+            return jsonify({
+                'success': False,
+                'error': 'Invalid symbol or action in pine script alert. Expected "buy" or "sell"'
+            }), 400
+        
+        # Validate quantity for all orders
+        if quantity <= 0:
+            return jsonify({
+                'success': False,
+                'error': 'Invalid quantity in pine script alert'
+            }), 400
+        
+        # Ensure symbol format is correct
+        if not symbol.endswith('USDT'):
+            symbol = f"{symbol}USDT"
+        
+        logger.info(f"Target Trend webhook received: {action} {quantity} {symbol} at {entry_price}")
+        
+        # Step 1: Close opposite position first
+        close_result = close_opposite_position(symbol, action)
+        if not close_result['success']:
+            return jsonify({
+                'success': False,
+                'error': f'Failed to close existing position: {close_result["error"]}'
+            }), 400
+        
+        # Step 2: Set leverage for the symbol
+        try:
+            binance_client.futures_change_leverage(symbol=symbol, leverage=leverage)
+            logger.info(f"Leverage set to {leverage}x for {symbol}")
+        except Exception as lev_error:
+            logger.warning(f"Could not set leverage for {symbol}: {lev_error}")
+        
+        # Step 3: Set margin type
+        try:
+            binance_client.futures_change_margin_type(symbol=symbol, marginType=trading_config['margin_type'])
+            logger.info(f"Margin type set to {trading_config['margin_type']} for {symbol}")
+        except Exception as margin_error:
+            logger.warning(f"Could not set margin type for {symbol} (may already be set): {margin_error}")
+        
+        # Step 4: Get symbol precision info
+        exchange_info = binance_client.futures_exchange_info()
+        symbol_info = next(s for s in exchange_info['symbols'] if s['symbol'] == symbol)
+        
+        lot_size_filter = next(f for f in symbol_info['filters'] if f['filterType'] == 'LOT_SIZE')
+        price_filter = next(f for f in symbol_info['filters'] if f['filterType'] == 'PRICE_FILTER')
+        
+        step_size = float(lot_size_filter['stepSize'])
+        tick_size = float(price_filter['tickSize'])
+        
+        # Round quantity to appropriate precision
+        quantity = round(quantity - (quantity % step_size), 8)
+        
+        if quantity <= 0:
+            return jsonify({
+                'success': False,
+                'error': 'Calculated quantity is too small after precision adjustment'
+            }), 400
+        
+        # Step 5: Execute main entry order
+        side = 'BUY' if action == 'buy' else 'SELL'
+        
+        main_order = binance_client.futures_create_order(
+            symbol=symbol,
+            side=side,
+            type='MARKET',
+            quantity=quantity
+        )
+        
+        logger.info(f"Main entry order executed: {action} {quantity} {symbol} (dual direction strategy)")
+        
+        # Store trade record
+        trade_record = {
+            'timestamp': datetime.now().isoformat(),
+            'source': 'target_trend_v1_pine_script_dual_direction',
+            'symbol': symbol,
+            'action': action,
+            'quantity': quantity,
+            'leverage': leverage,
+            'entry_price': entry_price,
+            'main_order': main_order,
+            'opposite_position_result': close_result,
+            'pine_script_data': data,
+            'status': 'active',
+            'mode': 'dual_direction'
+        }
+        
+        active_orders.append(trade_record)
+        
+        current_price = binance_client.futures_symbol_ticker(symbol=symbol)['price']
+        
+        return jsonify({
+            'success': True,
+            'message': f'Target Trend order executed: {action} {quantity} {symbol} (dual direction mode)',
+            'trade': {
+                'symbol': symbol,
+                'action': action,
+                'quantity': quantity,
+                'leverage': leverage,
+                'entry_price': entry_price,
+                'current_price': float(current_price),
+                'main_order_id': main_order.get('orderId'),
+                'opposite_position_closed': close_result.get('message', 'No opposite positions'),
+                'mode': 'dual_direction',
+                'note': 'Dual direction strategy - supports both long and short positions'
+            },
+            'timestamp': datetime.now().isoformat()
+        })
+        
+    except BinanceAPIException as e:
+        logger.error(f"Binance API error in Target Trend webhook: {e.message}")
+        return jsonify({
+            'success': False,
+            'error': f'Binance API error: {e.message}'
+        }), 400
+    except BinanceOrderException as e:
+        logger.error(f"Binance order error in Target Trend webhook: {e.message}")
+        return jsonify({
+            'success': False,
+            'error': f'Order error: {e.message}'
+        }), 400
+    except Exception as e:
+        logger.error(f"Error in Target Trend webhook: {str(e)}")
+        return jsonify({
+            'success': False,
+            'error': f'Target Trend webhook error: {str(e)}'
+        }), 500
+
+@binance_bp.route('/binance/test-target-trend', methods=['POST'])
+def test_target_trend_webhook():
+    """Test the Target Trend webhook with sample pine script data"""
+    # Sample data that matches the simplified pine script alert format
+    sample_buy_signal = {
+        "action": "buy",
+        "symbol": "BTCUSDT",
+        "quantity": "0.20",
+        "leverage": "10",
+        "entry": "50000.12345678"
+    }
+    
+    sample_sell_signal = {
+        "action": "sell",
+        "symbol": "BTCUSDT", 
+        "quantity": "0.20",
+        "leverage": "10",
+        "entry": "50000.12345678"
+    }
+    
+    return jsonify({
+        'success': True,
+        'message': 'Target Trend webhook test endpoint ready',
+        'webhook_url': '/binance/target-trend-webhook',
+        'sample_formats': {
+            'buy_signal': sample_buy_signal,
+            'sell_signal': sample_sell_signal
+        },
+        'features': [
+            'Dual direction strategy (long and short positions)',
+            'Closes opposite positions before opening new ones',
+            'Buy signals for long entries, sell signals for short entries',
+            'Supports both bullish and bearish market conditions',
+            'Respects symbol precision and tick size',
+            'Comprehensive order tracking and logging',
+            'Simplified JSON format'
+        ],
+        'usage_instructions': {
+            'step_1': 'Configure TradingView alert to send to /binance/target-trend-webhook or /tradingview/binancebinance/target-trend-webhook',
+            'step_2': 'Set pine script alert message to the raw JSON format',
+            'step_3': 'Ensure Binance API credentials are configured with futures trading permissions'
+        },
+        'supported_urls': [
+            '/api/binance/target-trend-webhook',
+            '/api/tradingview/binancebinance/target-trend-webhook'
+        ],
+        'timestamp': datetime.now().isoformat()
+    })
+
+@binance_bp.route('/binance/state-aware-ma-cross-webhook', methods=['POST'])
+@binance_bp.route('/tradingview/binancebinance/state-aware-ma-cross-webhook', methods=['POST'])  # Handle TradingView alert URL
+def state_aware_ma_cross_webhook():
+    """
+    Webhook endpoint specifically for State-aware MA Cross pine script
+    Handles buy/close signals for futures trading
+    Closes existing positions before opening new ones
+    """
+    global binance_client, active_orders
+    
+    if not binance_client:
+        return jsonify({
+            'success': False,
+            'error': 'Binance client not configured. Please configure API credentials first.'
+        }), 400
+    
+    try:
+        # Get the webhook data from pine script with better error handling
+        logger.info(f"State-aware MA Cross webhook called - Content-Type: {request.headers.get('Content-Type', 'Unknown')}")
+        
+        # Handle different content types
+        content_type = request.headers.get('Content-Type', '')
+        if 'application/json' in content_type:
+            data = request.get_json()
+        else:
+            # Handle plain text or other formats from TradingView
+            raw_data = request.get_data(as_text=True)
+            logger.info(f"Raw webhook data received: {raw_data}")
+            try:
+                import json
+                data = json.loads(raw_data)
+            except json.JSONDecodeError:
+                logger.error(f"Failed to parse webhook data as JSON: {raw_data}")
+                return jsonify({
+                    'success': False,
+                    'error': f'Invalid JSON format in webhook data: {raw_data}'
+                }), 400
+        
+        if not data:
+            logger.error("No webhook data received from TradingView")
+            return jsonify({
+                'success': False,
+                'error': 'No webhook data received from pine script'
+            }), 400
+        
+        logger.info(f"Parsed webhook data: {data}")
+        
+        # Extract parameters from State-aware MA Cross pine script alert
+        try:
+            symbol = str(data.get('symbol', '')).upper()
+            action = str(data.get('action', '')).lower()
+            # Get balance percentage from webhook data (default 20%)
+            balance_percentage = float(data.get('balance_percentage', 0.20))
+            leverage = int(data.get('leverage', trading_config['leverage']))
+            entry_price = float(data.get('entry', 0))
+        except (ValueError, TypeError) as param_error:
+            logger.error(f"Error parsing webhook parameters: {param_error}, data: {data}")
+            return jsonify({
+                'success': False,
+                'error': f'Invalid parameter format in webhook data: {str(param_error)}'
+            }), 400
+        
+        # Validate required parameters
+        if not symbol or action not in ['buy', 'sell', 'close']:
+            return jsonify({
+                'success': False,
+                'error': 'Invalid symbol or action in pine script alert. Expected "buy", "sell", or "close"'
+            }), 400
+        
+        # Validate balance percentage
+        if action in ['buy', 'sell'] and (balance_percentage <= 0 or balance_percentage > 1):
+            return jsonify({
+                'success': False,
+                'error': 'Invalid balance_percentage. Must be between 0.01 (1%) and 1.0 (100%)'
+            }), 400
+        
+        # Ensure symbol format is correct
+        if not symbol.endswith('USDT'):
+            symbol = f"{symbol}USDT"
+        
+        logger.info(f"State-aware MA Cross webhook received: {action} {symbol} using {balance_percentage*100}% balance at {entry_price}")
+        
+        # Handle close action differently
+        if action == 'close':
+            return handle_close_position(symbol)
+        
+        # Step 1: Calculate position quantity based on account balance
+        quantity_result = calculate_position_quantity(symbol, balance_percentage, leverage)
+        if not quantity_result['success']:
+            return jsonify({
+                'success': False,
+                'error': f'Failed to calculate position quantity: {quantity_result["error"]}',
+                'details': quantity_result['details']
+            }), 400
+        
+        quantity = quantity_result['quantity']
+        calculation_details = quantity_result['details']
+        
+        logger.info(f"Calculated quantity: {quantity} {symbol} (Position value: {calculation_details['position_value_usdt']} USDT)")
+        
+        # Step 2: Close opposite position first
+        close_result = close_opposite_position(symbol, action)
+        if not close_result['success']:
+            return jsonify({
+                'success': False,
+                'error': f'Failed to close existing position: {close_result["error"]}'
+            }), 400
+        
+        # Step 3: Set leverage for the symbol
+        try:
+            binance_client.futures_change_leverage(symbol=symbol, leverage=leverage)
+            logger.info(f"Leverage set to {leverage}x for {symbol}")
+        except Exception as lev_error:
+            logger.warning(f"Could not set leverage for {symbol}: {lev_error}")
+        
+        # Step 4: Set margin type
+        try:
+            binance_client.futures_change_margin_type(symbol=symbol, marginType=trading_config['margin_type'])
+            logger.info(f"Margin type set to {trading_config['margin_type']} for {symbol}")
+        except Exception as margin_error:
+            logger.warning(f"Could not set margin type for {symbol} (may already be set): {margin_error}")
+        
+        # Step 5: Place the main market order (buy or sell)
+        order_side = SIDE_BUY if action == 'buy' else SIDE_SELL
+        main_order = binance_client.futures_create_order(
+            symbol=symbol,
+            side=order_side,
+            type=ORDER_TYPE_MARKET,
+            quantity=quantity
+        )
+        
+        logger.info(f"State-aware MA Cross {action} order placed: {main_order}")
+        
+        # Get current price for response
+        current_price = binance_client.futures_symbol_ticker(symbol=symbol)['price']
+        
+        return jsonify({
+            'success': True,
+            'message': f'State-aware MA Cross order executed: {action} {quantity} {symbol} (auto-calculated quantity)',
+            'trade': {
+                'symbol': symbol,
+                'action': action,
+                'quantity': quantity,
+                'leverage': leverage,
+                'entry_price': entry_price,
+                'current_price': float(current_price),
+                'main_order_id': main_order.get('orderId'),
+                'opposite_position_closed': close_result.get('message', 'No opposite positions'),
+                'mode': 'auto_quantity',
+                'note': 'Quantity auto-calculated based on account balance percentage'
+            },
+            'calculation_details': calculation_details,
+            'timestamp': datetime.now().isoformat()
+        })
+        
+    except BinanceAPIException as e:
+        logger.error(f"Binance API error in State-aware MA Cross webhook: {e.message}")
+        return jsonify({
+            'success': False,
+            'error': f'Binance API error: {e.message}'
+        }), 400
+    except BinanceOrderException as e:
+        logger.error(f"Binance order error in State-aware MA Cross webhook: {e.message}")
+        return jsonify({
+            'success': False,
+            'error': f'Order error: {e.message}'
+        }), 400
+    except Exception as e:
+        logger.error(f"Error in State-aware MA Cross webhook: {str(e)}")
+        return jsonify({
+            'success': False,
+            'error': f'State-aware MA Cross webhook error: {str(e)}'
+        }), 500
+
+@binance_bp.route('/binance/test-state-aware-ma-cross', methods=['POST'])
+def test_state_aware_ma_cross_webhook():
+    """Test the State-aware MA Cross webhook with sample pine script data"""
+    # Sample data that matches the State-aware MA Cross pine script alert format
+    sample_buy_signal = {
+        "action": "buy",
+        "symbol": "BTCUSDT",
+        "balance_percentage": "0.20",  # 20% of account balance
+        "leverage": "10",
+        "entry": "50000.12345678"
+    }
+    
+    sample_sell_signal = {
+        "action": "sell",
+        "symbol": "BTCUSDT",
+        "balance_percentage": "0.20",  # 20% of account balance
+        "leverage": "10",
+        "entry": "50000.12345678"
+    }
+    
+    sample_close_signal = {
+        "action": "close",
+        "symbol": "BTCUSDT",
+        "leverage": "10",
+        "entry": "50000.12345678"
+    }
+    
+    return jsonify({
+        'success': True,
+        'message': 'State-aware MA Cross webhook test endpoint ready',
+        'webhook_url': '/binance/state-aware-ma-cross-webhook',
+        'sample_formats': {
+            'buy_signal': sample_buy_signal,
+            'sell_signal': sample_sell_signal,
+            'close_signal': sample_close_signal
+        },
+        'features': [
+            'State-aware MA Cross strategy support',
+            'Auto-calculated position sizing based on account balance',
+            'Dual direction strategy (long and short positions)',
+            'Closes opposite positions before opening new ones',
+            'Buy signals for long entries, sell signals for short entries',
+            'Close signals to exit all positions',
+            'Supports both bullish and bearish market conditions',
+            'Respects symbol precision and tick size',
+            'Comprehensive order tracking and logging',
+            'Balance percentage-based position sizing (default 20%)'
+        ],
+        'usage_instructions': {
+            'step_1': 'Configure TradingView alert to send to /binance/state-aware-ma-cross-webhook or /tradingview/binancebinance/state-aware-ma-cross-webhook',
+            'step_2': 'Set pine script alert message to the raw JSON format',
+            'step_3': 'Ensure Binance API credentials are configured with futures trading permissions',
+            'step_4': 'The webhook will automatically handle MA cross signals from your State-aware strategy'
+        },
+        'supported_urls': [
+            '/api/binance/state-aware-ma-cross-webhook',
+            '/api/tradingview/binancebinance/state-aware-ma-cross-webhook'
+        ],
+        'pine_script_integration': {
+            'buy_alert_message': '{"action": "buy", "symbol": "' + '{{ticker}}' + '", "balance_percentage": "0.20", "leverage": "10", "entry": "' + '{{close}}' + '"}',
+            'sell_alert_message': '{"action": "sell", "symbol": "' + '{{ticker}}' + '", "balance_percentage": "0.20", "leverage": "10", "entry": "' + '{{close}}' + '"}',
+            'close_alert_message': '{"action": "close", "symbol": "' + '{{ticker}}' + '", "leverage": "10", "entry": "' + '{{close}}' + '"}',
+            'balance_percentage_options': {
+                '10%': '0.10',
+                '20%': '0.20', 
+                '30%': '0.30',
+                '50%': '0.50'
+            }
+        },
+        'timestamp': datetime.now().isoformat()
+    })
 
 @binance_bp.route('/binance/test', methods=['POST'])
 def test_binance_connection():

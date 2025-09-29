@@ -1,28 +1,38 @@
 import os
 import sys
 import logging
+from dotenv import load_dotenv
+
+# Load environment variables
+load_dotenv()
 
 # DON'T CHANGE THIS !!!
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
-# Inform user to accept Xcode license with sudo if they haven't yet
-import subprocess
-import sys
+# Skip Xcode license check in production (only needed on macOS)
+if os.getenv('ENVIRONMENT') != 'production':
+    import subprocess
+    try:
+        subprocess.run(['xcodebuild', '-checkFirstLaunchStatus'], check=True)
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        # Skip if xcodebuild is not available (e.g., on Linux servers)
+        pass
 
-try:
-    subprocess.run(['xcodebuild', '-checkFirstLaunchStatus'], check=True)
-except subprocess.CalledProcessError:
-    print('You need to agree to the Xcode license. Please run: sudo xcodebuild -license and follow the instructions.')
-    sys.exit(1)
+# Configure logging for production and development
+log_level = logging.DEBUG if os.getenv('ENVIRONMENT') != 'production' else logging.INFO
+log_handlers = [logging.StreamHandler()]
 
-# Configure logging
+# Only add file handler in development or if writable directory exists
+if os.getenv('ENVIRONMENT') != 'production':
+    try:
+        log_handlers.append(logging.FileHandler('trading_system.log'))
+    except (PermissionError, OSError):
+        pass  # Skip file logging if not writable
+
 logging.basicConfig(
-    level=logging.INFO,
+    level=log_level,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.FileHandler('trading_system.log'),
-        logging.StreamHandler()
-    ]
+    handlers=log_handlers
 )
 
 from flask import Flask, send_from_directory
@@ -35,7 +45,9 @@ from src.routes.binance_trading import binance_bp
 from src.routes.integration import integration_bp
 
 app = Flask(__name__, static_folder=os.path.join(os.path.dirname(__file__), 'static'))
-app.config['SECRET_KEY'] = 'asdf#FGSgvasgf$5$WGT'
+
+# Use environment variable for secret key in production
+app.config['SECRET_KEY'] = os.getenv('SECRET_KEY', 'asdf#FGSgvasgf$5$WGT')
 
 # Enable CORS for all routes
 CORS(app)
@@ -71,4 +83,7 @@ def serve(path):
 
 
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=5001, debug=True)
+    # Development server settings
+    port = int(os.getenv('PORT', 5001))
+    debug = os.getenv('ENVIRONMENT') != 'production'
+    app.run(host='0.0.0.0', port=port, debug=debug)
