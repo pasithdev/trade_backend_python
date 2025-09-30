@@ -1,31 +1,14 @@
-# DigitalOcean App Platform Configuration
-name: crypto-trading-backend
+name: whale-app-864sn
 services:
 - name: web
   source_dir: /
   github:
-    repo: your-username/crypto_trading_system
+    repo: your-username/your-repo
     branch: main
-  run_command: gunicorn --bind 0.0.0.0:$PORT src.main:app --timeout 120 --workers 2
+  run_command: gunicorn --bind 0.0.0.0:8080 main:app
   environment_slug: python
   instance_count: 1
   instance_size_slug: basic-xxs
-  envs:
-  - key: ENVIRONMENT
-    value: production
-  - key: SECRET_KEY
-    value: your-super-secret-key-change-this
-  - key: BINANCE_API_KEY
-    value: your-binance-api-key
-    type: SECRET
-  - key: BINANCE_SECRET_KEY
-    value: your-binance-secret-key
-    type: SECRET
-  - key: BINANCE_TESTNET
-    value: "false"
-  http_port: 8080
   routes:
   - path: /
-domains:
-- name: your-domain.com
-  type: PRIMARY
+  http_port: 8080

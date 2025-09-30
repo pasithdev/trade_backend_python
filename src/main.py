@@ -84,6 +84,6 @@ def serve(path):
 
 if __name__ == '__main__':
     # Development server settings
-    port = int(os.getenv('PORT', 5001))
+    port = int(os.getenv('PORT', 8080))
     debug = os.getenv('ENVIRONMENT') != 'production'
     app.run(host='0.0.0.0', port=port, debug=debug)
