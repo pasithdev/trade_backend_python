@@ -507,3 +507,7 @@
 2025-09-29 23:07:09,715 - werkzeug - INFO -  * Debugger PIN: 732-061-178
 2025-09-29 23:20:09,845 - werkzeug - INFO -  * Detected change in '/Users/pasith/DevFlutter/crypto_trading_system/crypto_trading_backend/src/main.py', reloading
 2025-09-29 23:20:10,317 - werkzeug - INFO -  * Restarting with stat
+2025-09-30 12:36:41,385 - root - INFO - Database initialized successfully
+2025-09-30 12:36:41,386 - root - INFO - App running in development mode
+2025-09-30 12:36:41,387 - root - INFO - Static folder: D:\DevTrade\trade_backend_python\trade_backend_python\src\static
+2025-09-30 12:36:41,388 - root - INFO - App secret key configured: Yes
