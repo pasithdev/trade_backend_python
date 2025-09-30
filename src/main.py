@@ -86,16 +86,26 @@ with app.app_context():
 # Health check endpoint for DigitalOcean App Platform
 @app.route('/health')
 def health_check():
-    return {'status': 'healthy', 'message': 'Trading backend is running'}, 200
+    return jsonify({
+        'status': 'healthy', 
+        'message': 'Trading backend is running',
+        'timestamp': logging.Formatter().formatTime(logging.LogRecord(
+            'healthcheck', logging.INFO, '', 0, '', (), None
+        )),
+        'environment': os.getenv('ENVIRONMENT', 'development'),
+        'port': os.getenv('PORT', '8080')
+    }), 200
 
 # API status endpoint
 @app.route('/api/status')
 def api_status():
-    return {
+    return jsonify({
         'status': 'online',
         'environment': os.getenv('ENVIRONMENT', 'development'),
-        'version': '1.0.0'
-    }, 200
+        'version': '1.0.0',
+        'port': os.getenv('PORT', '8080'),
+        'workers': os.getenv('WEB_CONCURRENCY', '2')
+    }), 200
 
 # Root endpoint - serves the main page or API info
 @app.route('/')
