@@ -5,10 +5,22 @@ services:
   github:
     repo: pasithde/trade_backend_python
     branch: master
-  run_command: gunicorn --bind 0.0.0.0:8080 main:app
+  run_command: gunicorn -c gunicorn.conf.py src.main:app
   environment_slug: python
   instance_count: 1
   instance_size_slug: basic-xxs
   routes:
   - path: /
   http_port: 8080
+  envs:
+  - key: ENVIRONMENT
+    value: production
+  - key: PORT
+    value: "8080"
+  health_check:
+    http_path: /health
+    initial_delay_seconds: 30
+    period_seconds: 10
+    timeout_seconds: 5
+    success_threshold: 1
+    failure_threshold: 3

@@ -58,12 +58,38 @@ app.register_blueprint(tradingview_bp, url_prefix='/api')
 app.register_blueprint(binance_bp, url_prefix='/api')
 app.register_blueprint(integration_bp, url_prefix='/api')
 
-# uncomment if you need to use database
-app.config['SQLALCHEMY_DATABASE_URI'] = f"sqlite:///{os.path.join(os.path.dirname(__file__), 'database', 'app.db')}"
+# Database configuration
+database_path = os.path.join(os.path.dirname(__file__), 'database', 'app.db')
+# Ensure database directory exists
+os.makedirs(os.path.dirname(database_path), exist_ok=True)
+
+app.config['SQLALCHEMY_DATABASE_URI'] = f"sqlite:///{database_path}"
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 db.init_app(app)
+
+# Initialize database tables
 with app.app_context():
-    db.create_all()
+    try:
+        db.create_all()
+        logging.info("Database initialized successfully")
+    except Exception as e:
+        logging.error(f"Database initialization failed: {e}")
+        # Don't fail the app startup if database init fails
+        pass
+
+# Health check endpoint for DigitalOcean App Platform
+@app.route('/health')
+def health_check():
+    return {'status': 'healthy', 'message': 'Trading backend is running'}, 200
+
+# API status endpoint
+@app.route('/api/status')
+def api_status():
+    return {
+        'status': 'online',
+        'environment': os.getenv('ENVIRONMENT', 'development'),
+        'version': '1.0.0'
+    }, 200
 
 @app.route('/', defaults={'path': ''})
 @app.route('/<path:path>')

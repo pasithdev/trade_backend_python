@@ -1,0 +1,53 @@
+# Virtual environment
+venv/
+env/
+.env
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Git
+.git/
+.gitignore
+
+# Logs
+*.log
+logs/
+
+# Documentation
+*.md
+DEPLOYMENT_GUIDE.md
+DEPLOYMENT_SUMMARY.md
+MT4_INTEGRATION_GUIDE.md
+TRADINGVIEW_SETUP_GUIDE.md
+pine_script_limitations_explained.md
+
+# Trading files (not needed in production)
+*.pine
+*.mq4
+
+# Test files
+test_*.py
+*_test.py
+
+# Backup files
+*.bk*
+*.backup
+
+# Temporary files
+*.tmp
+*.temp

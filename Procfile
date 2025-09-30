@@ -1,1 +1,1 @@
-web: gunicorn --bind 0.0.0.0:$PORT src.main:app --timeout 120 --workers 2
+web: gunicorn -c gunicorn.conf.py src.main:app
