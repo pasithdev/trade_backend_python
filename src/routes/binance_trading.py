@@ -29,6 +29,71 @@ trading_config = {
 # Store active orders for tracking
 active_orders = []
 
+def log_binance_api_call(method_name, params=None, response=None, error=None):
+    """
+    Log Binance API calls with request parameters and response data
+    """
+    try:
+        log_data = {
+            'timestamp': datetime.now().isoformat(),
+            'api_method': method_name,
+            'request_params': params if params else {},
+            'success': error is None
+        }
+        
+        if error:
+            log_data['error'] = str(error)
+            logger.error(f"BINANCE API ERROR - {method_name}: {json.dumps(log_data, indent=2, default=str)}")
+        else:
+            # Only log response for successful calls, and limit size to prevent log spam
+            if response is not None:
+                if isinstance(response, (list, dict)):
+                    # Truncate large responses
+                    if isinstance(response, list) and len(response) > 10:
+                        log_data['response'] = response[:10] + [f"... and {len(response)-10} more items"]
+                    elif isinstance(response, dict) and len(str(response)) > 2000:
+                        log_data['response'] = f"Large response ({len(str(response))} chars): {str(response)[:500]}..."
+                    else:
+                        log_data['response'] = response
+                else:
+                    log_data['response'] = response
+            
+            logger.info(f"BINANCE API CALL - {method_name}: {json.dumps(log_data, indent=2, default=str)}")
+            
+    except Exception as log_error:
+        logger.error(f"Error logging Binance API call: {log_error}")
+
+def call_binance_api(api_method, *args, **kwargs):
+    """
+    Wrapper function to call Binance API methods with logging
+    """
+    method_name = api_method.__name__ if hasattr(api_method, '__name__') else str(api_method)
+    
+    # Prepare parameters for logging
+    params = {}
+    if args:
+        params['args'] = args
+    if kwargs:
+        params['kwargs'] = kwargs
+    
+    try:
+        # Make the API call
+        response = api_method(*args, **kwargs)
+        
+        # Log successful call
+        log_binance_api_call(method_name, params, response)
+        
+        return response
+        
+    except (BinanceAPIException, BinanceOrderException) as e:
+        # Log API error
+        log_binance_api_call(method_name, params, error=e)
+        raise
+    except Exception as e:
+        # Log unexpected error
+        log_binance_api_call(method_name, params, error=e)
+        raise
+
 def init_binance_client(api_key, api_secret, testnet=True):
     """Initialize Binance client with API credentials for Futures trading"""
     global binance_client
@@ -61,7 +126,7 @@ def init_binance_client(api_key, api_secret, testnet=True):
         
         # Test basic connection first
         try:
-            server_time = binance_client.get_server_time()
+            server_time = call_binance_api(binance_client.get_server_time)
             logger.info(f"Server time test successful: {server_time}")
         except Exception as server_error:
             logger.error(f"Failed to get server time: {server_error}")
@@ -69,7 +134,7 @@ def init_binance_client(api_key, api_secret, testnet=True):
         
         # Test the futures connection
         try:
-            futures_account_info = binance_client.futures_account()
+            futures_account_info = call_binance_api(binance_client.futures_account)
             logger.info(f"Binance Futures client initialized successfully. Total Wallet Balance: {futures_account_info.get('totalWalletBalance', 'Unknown')}")
         except Exception as futures_error:
             logger.error(f"Futures account access failed: {futures_error}")
@@ -81,7 +146,7 @@ def init_binance_client(api_key, api_secret, testnet=True):
         
         # Set position mode to One-way (BOTH) by default
         try:
-            binance_client.futures_change_position_mode(dualSidePosition=False)
+            call_binance_api(binance_client.futures_change_position_mode, dualSidePosition=False)
             logger.info("Position mode set to One-way (BOTH)")
         except Exception as pos_error:
             logger.warning(f"Could not set position mode (may already be set): {pos_error}")
@@ -281,10 +346,10 @@ def get_account_info():
     
     try:
         # Get futures account information
-        futures_account = binance_client.futures_account()
+        futures_account = call_binance_api(binance_client.futures_account)
         
         # Get positions
-        positions = binance_client.futures_position_information()
+        positions = call_binance_api(binance_client.futures_position_information)
         
         # Filter positions with size > 0
         active_positions = [
@@ -383,7 +448,7 @@ def execute_trade():
             symbol = f"{symbol}USDT"
         
         # Get current price
-        ticker = binance_client.get_symbol_ticker(symbol=symbol)
+        ticker = call_binance_api(binance_client.get_symbol_ticker, symbol=symbol)
         current_price = float(ticker['price'])
         
         # Calculate quantity if order_value is provided
@@ -402,14 +467,14 @@ def execute_trade():
             }), 400
         
         # Round quantity to appropriate precision
-        symbol_info = binance_client.get_symbol_info(symbol)
+        symbol_info = call_binance_api(binance_client.get_symbol_info, symbol)
         lot_size_filter = next(f for f in symbol_info['filters'] if f['filterType'] == 'LOT_SIZE')
         step_size = float(lot_size_filter['stepSize'])
         quantity = round(quantity - (quantity % step_size), 8)
         
         if action == 'buy':
             # Place market buy order
-            order = binance_client.order_market_buy(
+            order = call_binance_api(binance_client.order_market_buy,
                 symbol=symbol,
                 quantity=quantity
             )
@@ -419,7 +484,7 @@ def execute_trade():
             sl_price = current_price * (1 - sl_percentage / 100)
             
             # Place OCO sell order for TP/SL
-            oco_order = binance_client.create_oco_order(
+            oco_order = call_binance_api(binance_client.create_oco_order,
                 symbol=symbol,
                 side=SIDE_SELL,
                 quantity=quantity,
@@ -432,7 +497,7 @@ def execute_trade():
         else:  # sell
             # For sell orders, we assume user already has the asset
             # Place market sell order
-            order = binance_client.order_market_sell(
+            order = call_binance_api(binance_client.order_market_sell,
                 symbol=symbol,
                 quantity=quantity
             )
@@ -442,7 +507,7 @@ def execute_trade():
             sl_price = current_price * (1 + sl_percentage / 100)
             
             # Place OCO buy order for TP/SL
-            oco_order = binance_client.create_oco_order(
+            oco_order = call_binance_api(binance_client.create_oco_order,
                 symbol=symbol,
                 side=SIDE_BUY,
                 quantity=quantity,
@@ -536,10 +601,10 @@ def get_orders_by_symbol(symbol):
             symbol = f"{symbol}USDT"
         
         # Get open futures orders
-        orders = binance_client.futures_get_open_orders(symbol=symbol)
+        orders = call_binance_api(binance_client.futures_get_open_orders, symbol=symbol)
         
         # Get position information
-        positions = binance_client.futures_position_information(symbol=symbol)
+        positions = call_binance_api(binance_client.futures_position_information, symbol=symbol)
         position_info = [pos for pos in positions if float(pos['positionAmt']) != 0]
         
         return jsonify({
@@ -601,19 +666,19 @@ def execute_tradingview_trade(alert_data):
             symbol = f"{symbol}USDT"
         
         # Get current market price from futures
-        ticker = binance_client.futures_symbol_ticker(symbol=symbol)
+        ticker = call_binance_api(binance_client.futures_symbol_ticker, symbol=symbol)
         current_price = float(ticker['price'])
         
         # Set leverage for the symbol
         try:
-            binance_client.futures_change_leverage(symbol=symbol, leverage=trading_config['leverage'])
+            call_binance_api(binance_client.futures_change_leverage, symbol=symbol, leverage=trading_config['leverage'])
             logger.info(f"Leverage set to {trading_config['leverage']}x for {symbol}")
         except Exception as lev_error:
             logger.warning(f"Could not set leverage for {symbol}: {lev_error}")
         
         # Set margin type
         try:
-            binance_client.futures_change_margin_type(symbol=symbol, marginType=trading_config['margin_type'])
+            call_binance_api(binance_client.futures_change_margin_type, symbol=symbol, marginType=trading_config['margin_type'])
             logger.info(f"Margin type set to {trading_config['margin_type']} for {symbol}")
         except Exception as margin_error:
             logger.warning(f"Could not set margin type for {symbol} (may already be set): {margin_error}")
@@ -627,7 +692,7 @@ def execute_tradingview_trade(alert_data):
             quantity = float(quantity)
         
         # Get futures symbol precision info
-        exchange_info = binance_client.futures_exchange_info()
+        exchange_info = call_binance_api(binance_client.futures_exchange_info)
         symbol_info = next(s for s in exchange_info['symbols'] if s['symbol'] == symbol)
         
         lot_size_filter = next(f for f in symbol_info['filters'] if f['filterType'] == 'LOT_SIZE')
@@ -649,7 +714,7 @@ def execute_tradingview_trade(alert_data):
         # Execute main futures order
         side = 'BUY' if action == 'buy' else 'SELL'
         
-        main_order = binance_client.futures_create_order(
+        main_order = call_binance_api(binance_client.futures_create_order,
             symbol=symbol,
             side=side,
             type='MARKET',
@@ -712,7 +777,7 @@ def execute_tradingview_trade(alert_data):
             # Place Take Profit order
             if final_tp_price:
                 try:
-                    tp_order = binance_client.futures_create_order(
+                    tp_order = call_binance_api(binance_client.futures_create_order,
                         symbol=symbol,
                         side=close_side,
                         type='TAKE_PROFIT_MARKET',
@@ -728,7 +793,7 @@ def execute_tradingview_trade(alert_data):
             # Place Stop Loss order
             if final_sl_price:
                 try:
-                    sl_order = binance_client.futures_create_order(
+                    sl_order = call_binance_api(binance_client.futures_create_order,
                         symbol=symbol,
                         side=close_side,
                         type='STOP_MARKET',
@@ -869,7 +934,7 @@ def close_opposite_position(symbol, new_action):
         logger.info(f"Checking for opposite positions to close for {symbol} before {new_action}")
         
         # Get current positions for the symbol
-        positions = binance_client.futures_position_information(symbol=symbol)
+        positions = call_binance_api(binance_client.futures_position_information, symbol=symbol)
         
         for position in positions:
             position_amt = float(position['positionAmt'])
@@ -894,7 +959,7 @@ def close_opposite_position(symbol, new_action):
             
             if should_close:
                 # Close the position
-                close_order = binance_client.futures_create_order(
+                close_order = call_binance_api(binance_client.futures_create_order,
                     symbol=symbol,
                     side=close_side,
                     type='MARKET',
@@ -905,9 +970,9 @@ def close_opposite_position(symbol, new_action):
                 
                 # Cancel any existing orders for this symbol to avoid conflicts
                 try:
-                    existing_orders = binance_client.futures_get_open_orders(symbol=symbol)
+                    existing_orders = call_binance_api(binance_client.futures_get_open_orders, symbol=symbol)
                     for order in existing_orders:
-                        binance_client.futures_cancel_order(symbol=symbol, orderId=order['orderId'])
+                        call_binance_api(binance_client.futures_cancel_order, symbol=symbol, orderId=order['orderId'])
                         logger.info(f"Cancelled existing order {order['orderId']} for {symbol}")
                 except Exception as cancel_error:
                     logger.warning(f"Error cancelling existing orders for {symbol}: {cancel_error}")
@@ -946,7 +1011,7 @@ def calculate_position_quantity(symbol, balance_percentage=0.20, leverage=10):
         logger.info(f"Calculating position quantity for {symbol} using {balance_percentage*100}% of balance with {leverage}x leverage")
         
         # Step 1: Get account balance
-        account_info = binance_client.futures_account()
+        account_info = call_binance_api(binance_client.futures_account)
         total_balance = float(account_info['totalWalletBalance'])
         available_balance = float(account_info['availableBalance'])
         
@@ -958,7 +1023,7 @@ def calculate_position_quantity(symbol, balance_percentage=0.20, leverage=10):
         logger.info(f"Position value: {available_balance} * {balance_percentage} * {leverage} = {position_value_usdt} USDT")
         
         # Step 3: Get current market price
-        ticker = binance_client.futures_symbol_ticker(symbol=symbol)
+        ticker = call_binance_api(binance_client.futures_symbol_ticker, symbol=symbol)
         current_price = float(ticker['price'])
         
         logger.info(f"Current {symbol} price: {current_price}")
@@ -967,7 +1032,7 @@ def calculate_position_quantity(symbol, balance_percentage=0.20, leverage=10):
         raw_quantity = position_value_usdt / current_price
         
         # Step 5: Get symbol precision info for rounding
-        exchange_info = binance_client.futures_exchange_info()
+        exchange_info = call_binance_api(binance_client.futures_exchange_info)
         symbol_info = next(s for s in exchange_info['symbols'] if s['symbol'] == symbol)
         lot_size_filter = next(f for f in symbol_info['filters'] if f['filterType'] == 'LOT_SIZE')
         step_size = float(lot_size_filter['stepSize'])
@@ -1032,20 +1097,21 @@ def handle_close_position(symbol):
         logger.info(f"Processing close signal for {symbol}")
         
         # Get current positions for the symbol
-        positions = binance_client.futures_position_information(symbol=symbol)
+        positions = call_binance_api(binance_client.futures_position_information, symbol=symbol)
         closed_positions = []
         
         for position in positions:
             position_amt = float(position['positionAmt'])
             
-            # Only close long positions
+            # Close both long and short positions
             if position_amt > 0:
+                # Close long position with SELL order
                 close_quantity = position_amt
+                close_side = 'SELL'
                 
-                # Close the long position
                 close_order = binance_client.futures_create_order(
                     symbol=symbol,
-                    side='SELL',
+                    side=close_side,
                     type='MARKET',
                     quantity=close_quantity,
                     reduceOnly=True
@@ -1054,17 +1120,40 @@ def handle_close_position(symbol):
                 closed_positions.append({
                     'quantity': close_quantity,
                     'order_id': close_order.get('orderId'),
-                    'side': 'SELL'
+                    'side': close_side,
+                    'position_type': 'long'
                 })
                 
-                logger.info(f"Closed long position: SELL {close_quantity} {symbol} - Order ID: {close_order['orderId']}")
+                logger.info(f"Closed long position: {close_side} {close_quantity} {symbol} - Order ID: {close_order['orderId']}")
+                
+            elif position_amt < 0:
+                # Close short position with BUY order
+                close_quantity = abs(position_amt)  # Convert negative to positive
+                close_side = 'BUY'
+                
+                close_order = call_binance_api(binance_client.futures_create_order,
+                    symbol=symbol,
+                    side=close_side,
+                    type='MARKET',
+                    quantity=close_quantity,
+                    reduceOnly=True
+                )
+                
+                closed_positions.append({
+                    'quantity': close_quantity,
+                    'order_id': close_order.get('orderId'),
+                    'side': close_side,
+                    'position_type': 'short'
+                })
+                
+                logger.info(f"Closed short position: {close_side} {close_quantity} {symbol} - Order ID: {close_order['orderId']}")
         
         # Cancel any existing orders for this symbol
         try:
-            existing_orders = binance_client.futures_get_open_orders(symbol=symbol)
+            existing_orders = call_binance_api(binance_client.futures_get_open_orders, symbol=symbol)
             cancelled_orders = []
             for order in existing_orders:
-                binance_client.futures_cancel_order(symbol=symbol, orderId=order['orderId'])
+                call_binance_api(binance_client.futures_cancel_order, symbol=symbol, orderId=order['orderId'])
                 cancelled_orders.append(order['orderId'])
                 logger.info(f"Cancelled existing order {order['orderId']} for {symbol}")
         except Exception as cancel_error:
@@ -1074,7 +1163,7 @@ def handle_close_position(symbol):
         if not closed_positions:
             return jsonify({
                 'success': True,
-                'message': f'No long positions to close for {symbol}',
+                'message': f'No open positions to close for {symbol}',
                 'symbol': symbol,
                 'action': 'close',
                 'closed_positions': [],
@@ -1085,7 +1174,7 @@ def handle_close_position(symbol):
         # Store close trade record
         trade_record = {
             'timestamp': datetime.now().isoformat(),
-            'source': 'target_trend_v1_pine_script_close',
+            'source': 'state_aware_ma_cross_pine_script_close',
             'symbol': symbol,
             'action': 'close',
             'closed_positions': closed_positions,
@@ -1095,14 +1184,25 @@ def handle_close_position(symbol):
         
         active_orders.append(trade_record)
         
+        # Calculate position types for detailed message
+        long_positions = sum(1 for p in closed_positions if p['position_type'] == 'long')
+        short_positions = sum(1 for p in closed_positions if p['position_type'] == 'short')
+        position_summary = []
+        if long_positions > 0:
+            position_summary.append(f"{long_positions} long")
+        if short_positions > 0:
+            position_summary.append(f"{short_positions} short")
+        
         return jsonify({
             'success': True,
-            'message': f'Closed {len(closed_positions)} long position(s) for {symbol}',
+            'message': f'Closed {" and ".join(position_summary)} position(s) for {symbol}' if position_summary else f'Closed {len(closed_positions)} position(s) for {symbol}',
             'symbol': symbol,
             'action': 'close',
             'closed_positions': closed_positions,
             'cancelled_orders': cancelled_orders,
             'total_closed': len(closed_positions),
+            'long_positions_closed': long_positions,
+            'short_positions_closed': short_positions,
             'timestamp': datetime.now().isoformat()
         })
         
@@ -1182,20 +1282,20 @@ def target_trend_webhook():
         
         # Step 2: Set leverage for the symbol
         try:
-            binance_client.futures_change_leverage(symbol=symbol, leverage=leverage)
+            call_binance_api(binance_client.futures_change_leverage, symbol=symbol, leverage=leverage)
             logger.info(f"Leverage set to {leverage}x for {symbol}")
         except Exception as lev_error:
             logger.warning(f"Could not set leverage for {symbol}: {lev_error}")
         
         # Step 3: Set margin type
         try:
-            binance_client.futures_change_margin_type(symbol=symbol, marginType=trading_config['margin_type'])
+            call_binance_api(binance_client.futures_change_margin_type, symbol=symbol, marginType=trading_config['margin_type'])
             logger.info(f"Margin type set to {trading_config['margin_type']} for {symbol}")
         except Exception as margin_error:
             logger.warning(f"Could not set margin type for {symbol} (may already be set): {margin_error}")
         
         # Step 4: Get symbol precision info
-        exchange_info = binance_client.futures_exchange_info()
+        exchange_info = call_binance_api(binance_client.futures_exchange_info)
         symbol_info = next(s for s in exchange_info['symbols'] if s['symbol'] == symbol)
         
         lot_size_filter = next(f for f in symbol_info['filters'] if f['filterType'] == 'LOT_SIZE')
@@ -1216,7 +1316,7 @@ def target_trend_webhook():
         # Step 5: Execute main entry order
         side = 'BUY' if action == 'buy' else 'SELL'
         
-        main_order = binance_client.futures_create_order(
+        main_order = call_binance_api(binance_client.futures_create_order,
             symbol=symbol,
             side=side,
             type='MARKET',
@@ -1243,7 +1343,7 @@ def target_trend_webhook():
         
         active_orders.append(trade_record)
         
-        current_price = binance_client.futures_symbol_ticker(symbol=symbol)['price']
+        current_price = call_binance_api(binance_client.futures_symbol_ticker, symbol=symbol)['price']
         
         return jsonify({
             'success': True,
@@ -1441,21 +1541,21 @@ def state_aware_ma_cross_webhook():
         
         # Step 3: Set leverage for the symbol
         try:
-            binance_client.futures_change_leverage(symbol=symbol, leverage=leverage)
+            call_binance_api(binance_client.futures_change_leverage, symbol=symbol, leverage=leverage)
             logger.info(f"Leverage set to {leverage}x for {symbol}")
         except Exception as lev_error:
             logger.warning(f"Could not set leverage for {symbol}: {lev_error}")
         
         # Step 4: Set margin type
         try:
-            binance_client.futures_change_margin_type(symbol=symbol, marginType=trading_config['margin_type'])
+            call_binance_api(binance_client.futures_change_margin_type, symbol=symbol, marginType=trading_config['margin_type'])
             logger.info(f"Margin type set to {trading_config['margin_type']} for {symbol}")
         except Exception as margin_error:
             logger.warning(f"Could not set margin type for {symbol} (may already be set): {margin_error}")
         
         # Step 5: Place the main market order (buy or sell)
         order_side = SIDE_BUY if action == 'buy' else SIDE_SELL
-        main_order = binance_client.futures_create_order(
+        main_order = call_binance_api(binance_client.futures_create_order,
             symbol=symbol,
             side=order_side,
             type=ORDER_TYPE_MARKET,
@@ -1465,7 +1565,7 @@ def state_aware_ma_cross_webhook():
         logger.info(f"State-aware MA Cross {action} order placed: {main_order}")
         
         # Get current price for response
-        current_price = binance_client.futures_symbol_ticker(symbol=symbol)['price']
+        current_price = call_binance_api(binance_client.futures_symbol_ticker, symbol=symbol)['price']
         
         return jsonify({
             'success': True,
@@ -1590,14 +1690,14 @@ def test_binance_connection():
     
     try:
         # Test futures connection
-        server_time = binance_client.get_server_time()
-        futures_account = binance_client.futures_account()
+        server_time = call_binance_api(binance_client.get_server_time)
+        futures_account = call_binance_api(binance_client.futures_account)
         
         # Get some futures market data
-        btc_price = binance_client.futures_symbol_ticker(symbol='BTCUSDT')
+        btc_price = call_binance_api(binance_client.futures_symbol_ticker, symbol='BTCUSDT')
         
         # Get exchange info for futures
-        exchange_info = binance_client.futures_exchange_info()
+        exchange_info = call_binance_api(binance_client.futures_exchange_info)
         
         return jsonify({
             'success': True,
@@ -1625,4 +1725,34 @@ def test_binance_connection():
             'success': False,
             'error': f'Connection test error: {str(e)}'
         }), 500
+
+@binance_bp.route('/binance/test-state-aware-close', methods=['POST'])
+def test_state_aware_close_webhook():
+    """Test the State-aware MA Cross webhook close functionality with sample data"""
+    
+    # Test data for close signal
+    test_close_data = {
+        'action': 'close',
+        'symbol': 'BTCUSDT',
+        'leverage': '10',
+        'entry': '50000.00'
+    }
+    
+    return jsonify({
+        'success': True,
+        'message': 'State-aware MA Cross close test data generated',
+        'test_webhook_url': '/api/binance/state-aware-ma-cross-webhook',
+        'alternative_url': '/api/tradingview/binancebinance/state-aware-ma-cross-webhook',
+        'test_data': test_close_data,
+        'features': [
+            'Immediately closes ALL positions (both long and short) for the specified symbol',
+            'Cancels any existing open orders for the symbol',
+            'Works with any symbol supported by Binance Futures',
+            'Provides detailed response with closed position information',
+            'Tracks both long and short positions separately in response'
+        ],
+        'usage_note': 'Send the test_data as JSON POST to the webhook URL to test close functionality',
+        'pine_script_close_message': '{"action": "close", "symbol": "{{ticker}}", "leverage": "10", "entry": "{{close}}"}',
+        'timestamp': datetime.now().isoformat()
+    })
 
