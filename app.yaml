@@ -4,7 +4,7 @@ services:
   source_dir: /
   github:
     repo: pasithde/trade_backend_python
-    branch: main
+    branch: master
   run_command: gunicorn --bind 0.0.0.0:8080 main:app
   environment_slug: python
   instance_count: 1
