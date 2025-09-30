@@ -11,6 +11,7 @@ services:
   instance_size_slug: basic-xxs
   routes:
   - path: /
+    preserve_path_prefix: true
   http_port: 8080
   envs:
   - key: ENVIRONMENT
@@ -18,7 +19,7 @@ services:
   - key: PORT
     value: "8080"
   health_check:
-    http_path: /
+    http_path: /health
     initial_delay_seconds: 30
     period_seconds: 10
     timeout_seconds: 5

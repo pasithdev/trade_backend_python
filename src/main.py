@@ -35,7 +35,7 @@ logging.basicConfig(
     handlers=log_handlers
 )
 
-from flask import Flask, send_from_directory
+from flask import Flask, jsonify
 from flask_cors import CORS
 from src.models.user import db
 from src.routes.user import user_bp
@@ -101,11 +101,22 @@ def api_status():
 @app.route('/')
 def root():
     static_folder_path = app.static_folder
-    if static_folder_path and os.path.exists(os.path.join(static_folder_path, 'index.html')):
-        return send_from_directory(static_folder_path, 'index.html')
-    else:
-        # Return API information if no static files
-        return {
+    index_path = os.path.join(static_folder_path or "", 'index.html')
+
+    if static_folder_path and os.path.exists(index_path):
+        try:
+            with open(index_path, 'r', encoding='utf-8') as index_file:
+                html_content = index_file.read()
+            response = app.make_response(html_content)
+            response.headers['Content-Type'] = 'text/html; charset=utf-8'
+            response.headers['Cache-Control'] = 'no-cache, no-store, must-revalidate'
+            return response
+        except OSError as exc:
+            logging.error(f"Failed to load index.html: {exc}")
+
+    # Return API information if no static files or loading failed
+    return jsonify(
+        {
             'message': 'Trade Backend Python API',
             'status': 'online',
             'environment': os.getenv('ENVIRONMENT', 'development'),
@@ -119,7 +130,8 @@ def root():
                 'binance': '/api/binance',
                 'integration': '/api/integration'
             }
-        }, 200
+        }
+    ), 200
 
 @app.route('/<path:path>')
 def serve(path):
@@ -128,11 +140,11 @@ def serve(path):
             return "Static folder not configured", 404
 
     if path != "" and os.path.exists(os.path.join(static_folder_path, path)):
-        return send_from_directory(static_folder_path, path)
+        return app.send_static_file(path)
     else:
         index_path = os.path.join(static_folder_path, 'index.html')
         if os.path.exists(index_path):
-            return send_from_directory(static_folder_path, 'index.html')
+            return app.send_static_file('index.html')
         else:
             return "index.html not found", 404
 
