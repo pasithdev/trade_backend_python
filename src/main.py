@@ -49,8 +49,11 @@ app = Flask(__name__, static_folder=os.path.join(os.path.dirname(__file__), 'sta
 # Use environment variable for secret key in production
 app.config['SECRET_KEY'] = os.getenv('SECRET_KEY', 'asdf#FGSgvasgf$5$WGT')
 
-# Enable CORS for all routes
-CORS(app)
+# Enable CORS for all routes with proper configuration
+CORS(app, 
+     origins=["*"],  # Allow all origins in production (you can restrict this later)
+     methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+     allow_headers=["Content-Type", "Authorization", "X-Requested-With"])
 
 app.register_blueprint(user_bp, url_prefix='/api')
 app.register_blueprint(crypto_bp, url_prefix='/api')
@@ -72,6 +75,9 @@ with app.app_context():
     try:
         db.create_all()
         logging.info("Database initialized successfully")
+        logging.info(f"App running in {os.getenv('ENVIRONMENT', 'development')} mode")
+        logging.info(f"Static folder: {app.static_folder}")
+        logging.info(f"App secret key configured: {'Yes' if app.config.get('SECRET_KEY') else 'No'}")
     except Exception as e:
         logging.error(f"Database initialization failed: {e}")
         # Don't fail the app startup if database init fails
@@ -91,7 +97,30 @@ def api_status():
         'version': '1.0.0'
     }, 200
 
-@app.route('/', defaults={'path': ''})
+# Root endpoint - serves the main page or API info
+@app.route('/')
+def root():
+    static_folder_path = app.static_folder
+    if static_folder_path and os.path.exists(os.path.join(static_folder_path, 'index.html')):
+        return send_from_directory(static_folder_path, 'index.html')
+    else:
+        # Return API information if no static files
+        return {
+            'message': 'Trade Backend Python API',
+            'status': 'online',
+            'environment': os.getenv('ENVIRONMENT', 'development'),
+            'version': '1.0.0',
+            'endpoints': {
+                'health': '/health',
+                'api_status': '/api/status',
+                'users': '/api/users',
+                'crypto': '/api/crypto',
+                'tradingview': '/api/tradingview',
+                'binance': '/api/binance',
+                'integration': '/api/integration'
+            }
+        }, 200
+
 @app.route('/<path:path>')
 def serve(path):
     static_folder_path = app.static_folder
