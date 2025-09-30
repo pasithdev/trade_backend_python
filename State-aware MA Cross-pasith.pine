@@ -43,9 +43,27 @@ long_ma  = state == "00" ? s00_long :
            state == "10" ? s10_long :
                            s11_long
 
+// === MACD設定 ===
+[macd_line, signal_line, hist] = ta.macd(close, 12, 26, 9)
+macd_bearish_cross = ta.crossunder(macd_line, signal_line)
+
+// === EMA200設定 ===
+ema200 = ta.ema(close, 200)
+price_below_ema200 = close < ema200
+
+// === ポジション状態管理 ===
+var bool buy_signal_active = false
+var bool close_signal_sent = false
+
 // === クロス判定 ===
 long_signal  = ta.crossover(short_ma, long_ma)
 short_signal = ta.crossunder(short_ma, long_ma)
+
+// MACD bearish cross condition for immediate close
+macd_close_signal = buy_signal_active and not close_signal_sent and macd_bearish_cross
+
+// EMA200 close condition for immediate close
+ema200_close_signal = buy_signal_active and not close_signal_sent and price_below_ema200
 
 // Calculate entry level
 float entry_price = close
@@ -53,9 +71,14 @@ float entry_price = close
 // === エントリー ===
 if (long_signal)
     strategy.entry("Long", strategy.long, qty=quantity)
-if (short_signal)
+    buy_signal_active := true
+    close_signal_sent := false
+
+if (short_signal or macd_close_signal or ema200_close_signal)
     //strategy.entry("Short", strategy.short)
     strategy.close_all()
+    buy_signal_active := false
+    close_signal_sent := true
 
 // JSON Alert Messages for Binance Webhook
 buy_alert_message = '{"action": "buy", "symbol": "' + symbol + '", "quantity": "' + str.tostring(quantity) + '", "leverage": "' + str.tostring(leverage) + '", "entry": "' + str.tostring(math.round(entry_price, 8)) + '"}'
@@ -65,14 +88,17 @@ close_alert_message = '{"action": "close", "symbol": "' + symbol + '", "leverage
 // === プロット ===
 plot(short_ma, color=color.green, title="Short MA")
 plot(long_ma, color=color.red, title="Long MA")
+plot(ema200, color=color.blue, title="EMA200", linewidth=2)
 
 // Alert Conditions for Binance Webhook
 alertcondition(long_signal, title="Buy Signal", message="{{strategy.order.action}}")
-alertcondition(short_signal, title="Close Signal", message="{{strategy.order.action}}")
+alertcondition(short_signal or macd_close_signal or ema200_close_signal, title="Close Signal", message="{{strategy.order.action}}")
+alertcondition(macd_close_signal, title="MACD Close Signal", message="{{strategy.order.action}}")
+alertcondition(ema200_close_signal, title="EMA200 Close Signal", message="{{strategy.order.action}}")
 
 // Custom Alert Messages
 if long_signal and barstate.isconfirmed
     alert(buy_alert_message, alert.freq_once_per_bar)
     
-if short_signal and barstate.isconfirmed
+if (short_signal or macd_close_signal or ema200_close_signal) and barstate.isconfirmed
     alert(close_alert_message, alert.freq_once_per_bar)
