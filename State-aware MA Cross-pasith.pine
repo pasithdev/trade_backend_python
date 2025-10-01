@@ -81,7 +81,7 @@ if (short_signal or macd_close_signal or ema200_close_signal)
     close_signal_sent := true
 
 // JSON Alert Messages for Binance Webhook
-buy_alert_message = '{"action": "buy", "symbol": "' + symbol + '", "quantity": "' + str.tostring(quantity) + '", "leverage": "' + str.tostring(leverage) + '", "entry": "' + str.tostring(math.round(entry_price, 8)) + '"}'
+buy_alert_message = '{"action": "buy", "symbol": "' + symbol + '", "balance_percentage": "' + str.tostring(quantity) + '", "leverage": "' + str.tostring(leverage) + '", "entry": "' + str.tostring(math.round(entry_price, 8)) + '"}'
 
 close_alert_message = '{"action": "close", "symbol": "' + symbol + '", "leverage": "' + str.tostring(leverage) + '", "entry": "' + str.tostring(math.round(entry_price, 8)) + '"}'
 

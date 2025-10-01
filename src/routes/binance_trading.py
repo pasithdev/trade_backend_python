@@ -714,14 +714,19 @@ def execute_tradingview_trade(alert_data):
         # Execute main futures order
         side = 'BUY' if action == 'buy' else 'SELL'
         
+        # Generate unique client order ID for better tracking
+        import uuid
+        client_order_id = f"TV_{action}_{symbol}_{int(datetime.now().timestamp())}"
+        
         main_order = call_binance_api(binance_client.futures_create_order,
             symbol=symbol,
             side=side,
             type='MARKET',
-            quantity=quantity
+            quantity=quantity,
+            newClientOrderId=client_order_id
         )
         
-        logger.info(f"Main order executed: {action} {quantity} {symbol}")
+        logger.info(f"Main order executed: {action} {quantity} {symbol} (Client ID: {client_order_id})")
         
         # Handle TP/SL orders if prices are provided (using futures-specific orders)
         tp_order = None
@@ -777,6 +782,7 @@ def execute_tradingview_trade(alert_data):
             # Place Take Profit order
             if final_tp_price:
                 try:
+                    tp_client_order_id = f"TP_{action}_{symbol}_{int(datetime.now().timestamp())}"
                     tp_order = call_binance_api(binance_client.futures_create_order,
                         symbol=symbol,
                         side=close_side,
@@ -784,15 +790,18 @@ def execute_tradingview_trade(alert_data):
                         quantity=quantity,
                         stopPrice=final_tp_price,
                         reduceOnly=True,
-                        timeInForce='GTC'
+                        timeInForce='GTC',
+                        workingType='CONTRACT_PRICE',
+                        newClientOrderId=tp_client_order_id
                     )
-                    logger.info(f"Take Profit order placed: {close_side} {quantity} at {final_tp_price}")
+                    logger.info(f"Take Profit order placed: {close_side} {quantity} at {final_tp_price} (Client ID: {tp_client_order_id})")
                 except Exception as tp_error:
                     logger.error(f"Failed to place Take Profit order: {str(tp_error)}")
             
             # Place Stop Loss order
             if final_sl_price:
                 try:
+                    sl_client_order_id = f"SL_{action}_{symbol}_{int(datetime.now().timestamp())}"
                     sl_order = call_binance_api(binance_client.futures_create_order,
                         symbol=symbol,
                         side=close_side,
@@ -800,9 +809,11 @@ def execute_tradingview_trade(alert_data):
                         quantity=quantity,
                         stopPrice=final_sl_price,
                         reduceOnly=True,
-                        timeInForce='GTC'
+                        timeInForce='GTC',
+                        workingType='CONTRACT_PRICE',
+                        newClientOrderId=sl_client_order_id
                     )
-                    logger.info(f"Stop Loss order placed: {close_side} {quantity} at {final_sl_price}")
+                    logger.info(f"Stop Loss order placed: {close_side} {quantity} at {final_sl_price} (Client ID: {sl_client_order_id})")
                 except Exception as sl_error:
                     logger.error(f"Failed to place Stop Loss order: {str(sl_error)}")
         
@@ -1248,7 +1259,8 @@ def target_trend_webhook():
         # Extract parameters from dual direction pine script alert
         symbol = str(data.get('symbol', '')).upper()
         action = str(data.get('action', '')).lower()
-        quantity = float(data.get('quantity', 0))
+        # Try 'balance_percentage' first (new format), fallback to 'quantity' (old format)
+        balance_percentage = float(data.get('balance_percentage', data.get('quantity', 0)))  # This is percentage of equity (0.20 = 20%)
         leverage = int(data.get('leverage', trading_config['leverage']))
         entry_price = float(data.get('entry', 0))
         
@@ -1259,18 +1271,18 @@ def target_trend_webhook():
                 'error': 'Invalid symbol or action in pine script alert. Expected "buy" or "sell"'
             }), 400
         
-        # Validate quantity for all orders
-        if quantity <= 0:
+        # Validate balance percentage (should be between 0.01 and 1.0)
+        if balance_percentage <= 0 or balance_percentage > 1.0:
             return jsonify({
                 'success': False,
-                'error': 'Invalid quantity in pine script alert'
+                'error': f'Invalid quantity percentage in pine script alert: {balance_percentage}. Expected 0.01-1.0 (1%-100%)'
             }), 400
         
         # Ensure symbol format is correct
         if not symbol.endswith('USDT'):
             symbol = f"{symbol}USDT"
         
-        logger.info(f"Target Trend webhook received: {action} {quantity} {symbol} at {entry_price}")
+        logger.info(f"Target Trend webhook received: {action} {balance_percentage*100}% balance ({leverage}x leverage) for {symbol} at {entry_price}")
         
         # Step 1: Close opposite position first
         close_result = close_opposite_position(symbol, action)
@@ -1294,24 +1306,20 @@ def target_trend_webhook():
         except Exception as margin_error:
             logger.warning(f"Could not set margin type for {symbol} (may already be set): {margin_error}")
         
-        # Step 4: Get symbol precision info
-        exchange_info = call_binance_api(binance_client.futures_exchange_info)
-        symbol_info = next(s for s in exchange_info['symbols'] if s['symbol'] == symbol)
+        # Step 4: Calculate actual position quantity from percentage and leverage
+        logger.info(f"Converting quantity percentage {balance_percentage*100}% with {leverage}x leverage to actual quantity")
         
-        lot_size_filter = next(f for f in symbol_info['filters'] if f['filterType'] == 'LOT_SIZE')
-        price_filter = next(f for f in symbol_info['filters'] if f['filterType'] == 'PRICE_FILTER')
+        quantity_result = calculate_position_quantity(symbol, balance_percentage, leverage)
         
-        step_size = float(lot_size_filter['stepSize'])
-        tick_size = float(price_filter['tickSize'])
-        
-        # Round quantity to appropriate precision
-        quantity = round(quantity - (quantity % step_size), 8)
-        
-        if quantity <= 0:
+        if not quantity_result['success']:
             return jsonify({
                 'success': False,
-                'error': 'Calculated quantity is too small after precision adjustment'
+                'error': f'Failed to calculate position quantity: {quantity_result["error"]}',
+                'details': quantity_result.get('details', {})
             }), 400
+        
+        quantity = quantity_result['quantity']
+        logger.info(f"Calculated quantity: {quantity} {symbol} (from {balance_percentage*100}% balance * {leverage}x leverage)")
         
         # Step 5: Execute main entry order
         side = 'BUY' if action == 'buy' else 'SELL'
@@ -1332,11 +1340,13 @@ def target_trend_webhook():
             'symbol': symbol,
             'action': action,
             'quantity': quantity,
+            'balance_percentage': balance_percentage,
             'leverage': leverage,
             'entry_price': entry_price,
             'main_order': main_order,
             'opposite_position_result': close_result,
             'pine_script_data': data,
+            'quantity_calculation': quantity_result['details'],
             'status': 'active',
             'mode': 'dual_direction'
         }
@@ -1352,13 +1362,16 @@ def target_trend_webhook():
                 'symbol': symbol,
                 'action': action,
                 'quantity': quantity,
+                'balance_percentage': balance_percentage,
+                'balance_percentage_display': f"{balance_percentage*100}%",
                 'leverage': leverage,
                 'entry_price': entry_price,
                 'current_price': float(current_price),
                 'main_order_id': main_order.get('orderId'),
                 'opposite_position_closed': close_result.get('message', 'No opposite positions'),
                 'mode': 'dual_direction',
-                'note': 'Dual direction strategy - supports both long and short positions'
+                'quantity_calculation': quantity_result['details'],
+                'note': f'Quantity calculated from {balance_percentage*100}% of account balance with {leverage}x leverage'
             },
             'timestamp': datetime.now().isoformat()
         })
@@ -1483,7 +1496,8 @@ def state_aware_ma_cross_webhook():
             symbol = str(data.get('symbol', '')).upper()
             action = str(data.get('action', '')).lower()
             # Get balance percentage from webhook data (default 20%)
-            balance_percentage = float(data.get('balance_percentage', 0.20))
+            # Try 'balance_percentage' first (new format), fallback to 'quantity' (old format)
+            balance_percentage = float(data.get('balance_percentage', data.get('quantity', 0.20)))
             leverage = int(data.get('leverage', trading_config['leverage']))
             entry_price = float(data.get('entry', 0))
         except (ValueError, TypeError) as param_error:
