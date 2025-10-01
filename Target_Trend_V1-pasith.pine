@@ -77,10 +77,10 @@ if signal_up
 if signal_down
     strategy.entry("Short", strategy.short, qty=quantity)
 
-// JSON Alert Messages for Binance Webhook
-buy_alert_message = '{"action": "buy", "symbol": "' + symbol + '", "balance_percentage": "' + str.tostring(quantity) + '", "leverage": "' + str.tostring(leverage) + '", "entry": "' + str.tostring(math.round(entry_price, 8)) + '"}'
+// JSON Alert Messages for Smart Webhook (uses defaults: 20% quantity, 10x leverage)
+buy_alert_message = '{"action": "buy", "symbol": "{{ticker}}", "entry": "{{close}}"}'
 
-sell_alert_message = '{"action": "sell", "symbol": "' + symbol + '", "balance_percentage": "' + str.tostring(quantity) + '", "leverage": "' + str.tostring(leverage) + '", "entry": "' + str.tostring(math.round(entry_price, 8)) + '"}'
+sell_alert_message = '{"action": "sell", "symbol": "{{ticker}}", "entry": "{{close}}"}'
 
 
 // Method to draw entry signals only

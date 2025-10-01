@@ -49,7 +49,7 @@ def test_binance_api_logging():
 def test_webhook_logging():
     """Test webhook API logging with sample data"""
     
-    webhook_url = "http://localhost:5000/api/binance/state-aware-ma-cross-webhook"
+    webhook_url = "http://localhost:80/api/binance/state-aware-ma-cross-webhook"
     
     # Test data for buy signal
     test_data = {

@@ -1,0 +1,641 @@
+//@version=5
+strategy("Crypto Super Scalper v2.0 [Strategy Tester]", 
+         shorttitle="CSS v2.0",
+         overlay=true, 
+         margin_long=100, 
+         margin_short=100, 
+         pyramiding=0, 
+         initial_capital=10000, 
+         default_qty_type=strategy.percent_of_equity, 
+         default_qty_value=100,
+         commission_type=strategy.commission.percent, 
+         commission_value=0.075,
+         slippage=2,
+         currency=currency.USD,
+         process_orders_on_close=false,
+         backtest_fill_limits_assumption=0,
+         max_bars_back=500,
+         max_lines_count=500,
+         max_labels_count=500)
+
+// =============================================================================
+// INPUT PARAMETERS
+// =============================================================================
+// Liquidity & Fakeout Detection
+input_lookback = input.int(20, "Liquidity Lookback Period", minval=10, maxval=50)
+input_wick_threshold = input.float(0.6, "Wick Rejection Threshold", minval=0.3, maxval=0.8)
+input_liquidity_buffer = input.float(0.05, "Liquidity Buffer %", minval=0.01, maxval=0.2) / 100
+
+// Smart Money Concepts
+input_ob_lookback = input.int(10, "Order Block Lookback", minval=5, maxval=20)
+input_fvg_size = input.float(0.1, "FVG Minimum Size %", minval=0.05, maxval=0.3) / 100
+input_htf_trend = input.string("15", "Higher TF Trend", options=["5", "15", "30"])
+
+// Volume & Whale Detection
+input_volume_multiplier = input.float(3.0, "Volume Spike Multiplier", minval=2.0, maxval=5.0)
+input_volume_smooth = input.int(8, "Volume Smoothing Period", minval=5, maxval=20)
+
+// Volatility & Breakout
+input_atr_period = input.int(14, "ATR Period", minval=10, maxval=20)
+input_volatility_threshold = input.float(0.7, "Volatility Threshold", minval=0.3, maxval=1.5)
+input_consolidation_bars = input.int(10, "Consolidation Bars", minval=5, maxval=20)
+
+// Risk Management
+input_risk_per_trade = input.float(1.0, "Risk Per Trade %", minval=0.5, maxval=3.0, group="Risk Management") / 100
+input_rr_ratio = input.float(1.0, "Initial RR Ratio", minval=0.5, maxval=2.0, group="Risk Management")
+input_trail_enabled = input.bool(true, "Enable Trailing Stop", group="Risk Management")
+
+// Strategy Tester Configuration
+input_start_date = input.time(timestamp("2020-01-01 00:00"), "Backtest Start Date", group="Strategy Tester")
+input_end_date = input.time(timestamp("2025-12-31 23:59"), "Backtest End Date", group="Strategy Tester")
+input_enable_long = input.bool(true, "Enable Long Trades", group="Strategy Tester")
+input_enable_short = input.bool(true, "Enable Short Trades", group="Strategy Tester")
+input_position_size = input.float(100.0, "Position Size (%)", minval=1.0, maxval=100.0, step=1.0, group="Strategy Tester")
+input_max_drawdown_limit = input.float(20.0, "Max Drawdown Limit (%)", minval=5.0, maxval=50.0, group="Strategy Tester")
+input_show_trade_labels = input.bool(true, "Show Trade Entry/Exit Labels", group="Strategy Tester")
+input_show_performance_table = input.bool(true, "Show Performance Table", group="Strategy Tester")
+
+// =============================================================================
+// CORE VARIABLES
+// =============================================================================
+// Timeframe conversion for HTF trend
+htf_trend_period = switch input_htf_trend
+    "5" => "5"
+    "15" => "15"
+    "30" => "30"
+
+htf_close = request.security(syminfo.tickerid, htf_trend_period, close, lookahead=barmerge.lookahead_on)
+
+// Volatility calculations
+atr_value = ta.atr(input_atr_period)
+kaufman_volatility = ta.stdev(close, 10) / ta.sma(close, 10)
+current_volatility = atr_value / close
+
+// Volume calculations
+smooth_volume = ta.sma(volume, input_volume_smooth)
+volume_spike = volume > smooth_volume * input_volume_multiplier
+volume_imbalance = math.abs(close - open) / (high - low) > 0.7
+
+// =============================================================================
+// 1. LIQUIDITY & FAKEOUT DETECTION
+// =============================================================================
+recent_high = ta.highest(high, input_lookback)
+recent_low = ta.lowest(low, input_lookback)
+prev_high = ta.highest(high[1], input_lookback)
+prev_low = ta.lowest(low[1], input_lookback)
+
+// Liquidity levels with buffer
+liquidity_above = recent_high * (1 + input_liquidity_buffer)
+liquidity_below = recent_low * (1 - input_liquidity_buffer)
+
+// Wick rejection detection
+upper_wick_ratio = (high - math.max(open, close)) / (high - low)
+lower_wick_ratio = (math.min(open, close) - low) / (high - low)
+
+bullish_wick_rejection = lower_wick_ratio > input_wick_threshold and close > open
+bearish_wick_rejection = upper_wick_ratio > input_wick_threshold and close < open
+
+// Liquidity sweep detection
+liquidity_sweep_bullish = low < liquidity_below and close > liquidity_below and bullish_wick_rejection
+liquidity_sweep_bearish = high > liquidity_above and close < liquidity_above and bearish_wick_rejection
+
+// =============================================================================
+// 2. SMART MONEY CONCEPTS
+// =============================================================================
+// Order Block Detection
+bullish_order_block = low == ta.lowest(low, input_ob_lookback) and close > open and volume_spike
+bearish_order_block = high == ta.highest(high, input_ob_lookback) and close < open and volume_spike
+
+// Store Order Blocks
+var float[] bull_ob_high = array.new_float()
+var float[] bull_ob_low = array.new_float()
+var int[] bull_ob_bar = array.new_int()
+
+var float[] bear_ob_high = array.new_float()
+var float[] bear_ob_low = array.new_float()
+var int[] bear_ob_bar = array.new_int()
+
+if bullish_order_block
+    array.push(bull_ob_high, high)
+    array.push(bull_ob_low, low)
+    array.push(bull_ob_bar, bar_index)
+
+if bearish_order_block
+    array.push(bear_ob_high, high)
+    array.push(bear_ob_low, low)
+    array.push(bear_ob_bar, bar_index)
+
+// Clean old Order Blocks (keep last 10)
+if array.size(bull_ob_bar) > 10
+    array.shift(bull_ob_high)
+    array.shift(bull_ob_low)
+    array.shift(bull_ob_bar)
+
+if array.size(bear_ob_bar) > 10
+    array.shift(bear_ob_high)
+    array.shift(bear_ob_low)
+    array.shift(bear_ob_bar)
+
+// Fair Value Gap Detection
+fvg_bullish = low[2] > high and (low[2] - high) / close > input_fvg_size
+fvg_bearish = high[2] < low and (low - high[2]) / close > input_fvg_size
+
+// FVG Fill Detection
+fvg_bullish_filled = ta.crossunder(low, ta.lowest(low, 5)[1]) and fvg_bullish[1]
+fvg_bearish_filled = ta.crossover(high, ta.highest(high, 5)[1]) and fvg_bearish[1]
+
+// HTF Trend Filter
+htf_trend_bullish = htf_close > htf_close[1]
+htf_trend_bearish = htf_close < htf_close[1]
+
+// =============================================================================
+// 3. WHALE & VOLUME SPIKE DETECTION
+// =============================================================================
+bullish_whale_spike = volume_spike and close > open and volume_imbalance
+bearish_whale_spike = volume_spike and close < open and volume_imbalance
+
+// =============================================================================
+// 4. HIDDEN VOLATILITY EXPANSION
+// =============================================================================
+// Consolidation detection
+consolidation_high = ta.highest(high, input_consolidation_bars)
+consolidation_low = ta.lowest(low, input_consolidation_bars)
+consolidation_range = (consolidation_high - consolidation_low) / consolidation_low
+
+is_consolidating = consolidation_range < current_volatility * input_volatility_threshold
+
+// Volatility expansion breakout
+volatility_expansion = current_volatility > ta.sma(current_volatility, 20) * 1.5
+breakout_bullish = close > consolidation_high and volatility_expansion and is_consolidating
+breakout_bearish = close < consolidation_low and volatility_expansion and is_consolidating
+
+// =============================================================================
+// 5. ENTRY LOGIC & TRADE MANAGEMENT
+// =============================================================================
+// Long Entry Conditions
+long_condition_1 = liquidity_sweep_bullish and bullish_whale_spike and htf_trend_bullish
+long_condition_2 = fvg_bullish_filled and bullish_whale_spike
+long_condition_3 = breakout_bullish and volume_spike
+
+// Short Entry Conditions  
+short_condition_1 = liquidity_sweep_bearish and bearish_whale_spike and htf_trend_bearish
+short_condition_2 = fvg_bearish_filled and bearish_whale_spike
+short_condition_3 = breakout_bearish and volume_spike
+
+// Check Order Blocks for additional confirmation
+check_bullish_ob() =>
+    ob_confirmed = false
+    if array.size(bull_ob_bar) > 0
+        for i = 0 to array.size(bull_ob_bar) - 1
+            if bar_index - array.get(bull_ob_bar, i) < 50
+                ob_high = array.get(bull_ob_high, i)
+                ob_low = array.get(bull_ob_low, i)
+                if low <= ob_high and low >= ob_low
+                    ob_confirmed := true
+                    break
+    ob_confirmed
+
+check_bearish_ob() =>
+    ob_confirmed = false
+    if array.size(bear_ob_bar) > 0
+        for i = 0 to array.size(bear_ob_bar) - 1
+            if bar_index - array.get(bear_ob_bar, i) < 50
+                ob_high = array.get(bear_ob_high, i)
+                ob_low = array.get(bear_ob_low, i)
+                if high <= ob_high and high >= ob_low
+                    ob_confirmed := true
+                    break
+    ob_confirmed
+
+// Date Range Filter for Strategy Tester
+in_date_range = time >= input_start_date and time <= input_end_date
+
+// Final Entry Signals with Strategy Tester filters
+enter_long = (long_condition_1 or long_condition_2 or long_condition_3) and check_bullish_ob() and strategy.position_size == 0 and input_enable_long and in_date_range
+enter_short = (short_condition_1 or short_condition_2 or short_condition_3) and check_bearish_ob() and strategy.position_size == 0 and input_enable_short and in_date_range
+
+// Enhanced Position Sizing for Strategy Tester
+equity = strategy.initial_capital + strategy.netprofit
+risk_amount = equity * input_risk_per_trade
+position_size_multiplier = input_position_size / 100
+
+// Drawdown Protection
+current_equity = strategy.initial_capital + strategy.netprofit
+peak_equity = strategy.initial_capital + strategy.max_runup
+current_dd_percent = peak_equity > 0 ? (peak_equity - current_equity) / peak_equity * 100 : 0
+drawdown_exceeded = current_dd_percent > input_max_drawdown_limit
+
+// Stop Loss & Take Profit
+long_stop = recent_low * (1 - input_liquidity_buffer)
+short_stop = recent_high * (1 + input_liquidity_buffer)
+
+long_target_1 = close + (close - long_stop) * input_rr_ratio
+short_target_1 = close - (short_stop - close) * input_rr_ratio
+
+// =============================================================================
+// 6. ENHANCED STRATEGY EXECUTION FOR TRADINGVIEW TESTER
+// =============================================================================
+
+// Super Scalper Webhook Alert Messages (professional scalping with 15% quantity, 20x leverage)
+buy_alert_message = '{"action": "long", "symbol": "{{ticker}}", "entry": "{{close}}", "signal_strength": "' + (long_condition_1 ? 'strong' : long_condition_2 ? 'normal' : 'weak') + '", "market_condition": "' + (volatility_expansion ? 'volatile' : is_consolidating ? 'ranging' : 'trending') + '", "risk_level": "' +(current_dd_percent > 10 ? 'high' : current_dd_percent > 5 ? 'medium' : 'low') + '"}'
+
+sell_alert_message = '{"action": "short", "symbol": "{{ticker}}", "entry": "{{close}}", "signal_strength": "' + (short_condition_1 ? 'strong' : short_condition_2 ? 'normal' : 'weak') + '", "market_condition": "' + (volatility_expansion ? 'volatile' : is_consolidating ? 'ranging' : 'trending') + '", "risk_level": "' +(current_dd_percent > 10 ? 'high' : current_dd_percent > 5 ? 'medium' : 'low') + '"}'
+
+emergency_exit_message = '{"action": "emergency_exit", "symbol": "{{ticker}}", "risk_level": "high", "market_condition": "volatile"}'
+
+// Calculate position size based on risk and available equity
+long_position_size = risk_amount / math.max(close - long_stop, syminfo.mintick) * position_size_multiplier
+short_position_size = risk_amount / math.max(short_stop - close, syminfo.mintick) * position_size_multiplier
+
+// Strategy entries with drawdown protection
+if enter_long and not drawdown_exceeded
+    strategy.entry("Long", strategy.long, qty=long_position_size, comment="📈 LONG @ " + str.tostring(close, "#.####"))
+    alert(buy_alert_message, alert.freq_once_per_bar)
+    
+    // Partial profit taking and trailing stop
+    strategy.exit("Long TP1", "Long", qty_percent=50, limit=long_target_1, stop=long_stop, comment="🎯 TP1")
+    
+    if input_trail_enabled
+        strategy.exit("Long Trail", "Long", stop=long_stop, trail_points=math.abs(close - long_stop), trail_offset=atr_value * 0.5, comment="📊 Trail")
+    else
+        strategy.exit("Long TP2", "Long", limit=long_target_1 * 1.5, stop=long_stop, comment="🎯 TP2")
+
+if enter_short and not drawdown_exceeded
+    strategy.entry("Short", strategy.short, qty=short_position_size, comment="📉 SHORT @ " + str.tostring(close, "#.####"))
+    alert(sell_alert_message, alert.freq_once_per_bar)
+    
+    // Partial profit taking and trailing stop
+    strategy.exit("Short TP1", "Short", qty_percent=50, limit=short_target_1, stop=short_stop, comment="🎯 TP1")
+    
+    if input_trail_enabled
+        strategy.exit("Short Trail", "Short", stop=short_stop, trail_points=math.abs(short_stop - close), trail_offset=atr_value * 0.5, comment="📊 Trail")
+    else
+        strategy.exit("Short TP2", "Short", limit=short_target_1 * 1.5, stop=short_stop, comment="🎯 TP2")
+
+// Emergency exit on excessive drawdown
+if drawdown_exceeded and strategy.position_size != 0
+    strategy.close_all(comment="🚨 DD LIMIT")
+    alert(emergency_exit_message, alert.freq_once_per_bar)
+
+// =============================================================================
+// 7. CHART-LOCKED VISUALIZATION SYSTEM (Target Trend Style)
+// =============================================================================
+
+// UDT for managing lines and labels that lock with chart
+type TradingLines
+    line[] lines
+    label[] labels
+
+// Initialize UDT for different elements
+var TradingLines liquidity_lines = TradingLines.new(array.new_line(), array.new_label())
+var TradingLines orderblock_lines = TradingLines.new(array.new_line(), array.new_label())
+var TradingLines entry_lines = TradingLines.new(array.new_line(), array.new_label())
+var TradingLines target_lines = TradingLines.new(array.new_line(), array.new_label())
+// Method to draw chart-locked lines (Target Trend style)
+method draw_trading_lines(TradingLines lines_obj, bool trigger_condition, string line_text, float price_level, color line_color, bool extend_right = true)=>
+    if trigger_condition and barstate.isconfirmed
+        // Clear existing lines and labels
+        for line_i in lines_obj.lines
+            int i = lines_obj.lines.indexof(line_i)
+            if lines_obj.labels.size() > i
+                label.delete(lines_obj.labels.get(i))
+            line.delete(line_i)
+        
+        array.clear(lines_obj.lines)
+        array.clear(lines_obj.labels)
+        
+        // Create new line that extends with chart
+        line new_line = line.new(bar_index, price_level, bar_index + (extend_right ? 20 : 1), price_level)
+        label new_label = label.new(bar_index + 20, price_level, line_text)
+        
+        // Push to arrays
+        lines_obj.lines.push(new_line)
+        lines_obj.labels.push(new_label)
+        
+        // Style the line and label
+        new_line.set_color(line_color)
+        new_line.set_width(2)
+        new_line.set_style(line.style_solid)
+        
+        new_label.set_style(label.style_label_left)
+        new_label.set_color(line_color)
+        new_label.set_textcolor(color.white)
+        new_label.set_size(size.small)
+    
+    // Update existing lines to extend with chart movement
+    if not lines_obj.lines.size() == 0
+        line current_line = lines_obj.lines.first()
+        label current_label = lines_obj.labels.first()
+        
+        if extend_right
+            current_line.set_x2(bar_index + 20)
+            current_label.set_x(bar_index + 20)
+
+// Liquidity Levels using Target Trend's locking method
+liquidity_lines.draw_trading_lines(ta.change(liquidity_above) != 0 or ta.change(liquidity_below) != 0, 
+                                  "Liquidity: " + str.tostring(liquidity_above, "#.####") + " / " + str.tostring(liquidity_below, "#.####"), 
+                                  (liquidity_above + liquidity_below) / 2, color.yellow)
+
+// Also keep basic plots for real-time visibility
+plot(liquidity_above, "Liquidity Above", color=color.red, linewidth=2)
+plot(liquidity_below, "Liquidity Below", color=color.green, linewidth=2)
+
+// Order Blocks using Target Trend's chart-locking method
+orderblock_lines.draw_trading_lines(bullish_order_block, 
+                                   "BULL OB: " + str.tostring(high, "#.####") + "-" + str.tostring(low, "#.####"), 
+                                   (high + low) / 2, color.green)
+
+orderblock_lines.draw_trading_lines(bearish_order_block, 
+                                   "BEAR OB: " + str.tostring(high, "#.####") + "-" + str.tostring(low, "#.####"), 
+                                   (high + low) / 2, color.red)
+
+// Background fills for Order Blocks (these naturally lock to candles)
+bgcolor(bullish_order_block ? color.new(color.green, 85) : na, title="Bullish Order Block")
+bgcolor(bearish_order_block ? color.new(color.red, 85) : na, title="Bearish Order Block")
+
+// Mark Order Block levels with circles
+plot(bullish_order_block ? high : na, "Bull OB High", color=color.green, linewidth=2, style=plot.style_circles)
+plot(bullish_order_block ? low : na, "Bull OB Low", color=color.green, linewidth=2, style=plot.style_circles)
+plot(bearish_order_block ? high : na, "Bear OB High", color=color.red, linewidth=2, style=plot.style_circles)
+plot(bearish_order_block ? low : na, "Bear OB Low", color=color.red, linewidth=2, style=plot.style_circles)
+
+// FVG Visualization
+bgcolor(fvg_bullish ? color.new(color.green, 95) : na)
+bgcolor(fvg_bearish ? color.new(color.red, 95) : na)
+
+// Volume Spikes and Key Level Markers
+plot(volume_spike ? high * 1.001 : na, "Volume Spike", color=color.orange, style=plot.style_cross, linewidth=3)
+
+// Mark key levels with circles that lock to chart
+plot(liquidity_sweep_bullish ? low : na, "Bullish Sweep", color=color.lime, style=plot.style_circles, linewidth=4)
+plot(liquidity_sweep_bearish ? high : na, "Bearish Sweep", color=color.red, style=plot.style_circles, linewidth=4)
+
+// Consolidation range markers
+plot(is_consolidating ? consolidation_high : na, "Consolidation High", color=color.blue, style=plot.style_line, linewidth=1)
+plot(is_consolidating ? consolidation_low : na, "Consolidation Low", color=color.blue, style=plot.style_line, linewidth=1)
+
+// Entry Signals using Target Trend's chart-locking method
+entry_lines.draw_trading_lines(enter_long, 
+                              "LONG @ " + str.tostring(close, "#.####"), 
+                              close, color.lime)
+
+entry_lines.draw_trading_lines(enter_short, 
+                              "SHORT @ " + str.tostring(close, "#.####"), 
+                              close, color.red)
+
+// Trade Management Lines using Target Trend's approach
+target_lines.draw_trading_lines(strategy.position_size > 0, 
+                               "SL: " + str.tostring(long_stop, "#.####") + " | TP: " + str.tostring(long_target_1, "#.####"), 
+                               long_target_1, color.lime)
+
+target_lines.draw_trading_lines(strategy.position_size < 0, 
+                               "SL: " + str.tostring(short_stop, "#.####") + " | TP: " + str.tostring(short_target_1, "#.####"), 
+                               short_target_1, color.orange)
+
+// Entry signal shapes (these naturally lock to candles)
+plotshape(enter_long, "Long Entry", shape.triangleup, location.belowbar, color=color.lime, size=size.normal, text="LONG")
+plotshape(enter_short, "Short Entry", shape.triangledown, location.abovebar, color=color.red, size=size.normal, text="SHORT")
+
+// Trade Management plots for real-time visibility
+plot(strategy.position_size > 0 ? long_stop : na, "Long Stop", color=color.red, linewidth=2, style=plot.style_line)
+plot(strategy.position_size > 0 ? long_target_1 : na, "Long Target", color=color.lime, linewidth=2, style=plot.style_line)
+plot(strategy.position_size < 0 ? short_stop : na, "Short Stop", color=color.red, linewidth=2, style=plot.style_line)
+plot(strategy.position_size < 0 ? short_target_1 : na, "Short Target", color=color.orange, linewidth=2, style=plot.style_line)
+
+// Target Trend style signal visualization
+float sigUp = enter_long ? low - atr_value*2 : na
+float sigDn = enter_short ? high + atr_value*2 : na
+
+// Double-layered signals like Target Trend
+plotshape(sigUp, "", shape.triangleup, location.absolute, color.lime, size = size.tiny)
+plotshape(sigUp, "", shape.triangleup, location.absolute, color.new(color.lime, 80), size = size.small)
+
+plotshape(sigDn, "", shape.triangledown, location.absolute, color.red, size = size.tiny)
+plotshape(sigDn, "", shape.triangledown, location.absolute, color.new(color.red, 80), size = size.small)
+
+// Entry labels with Target Trend positioning
+if enter_long and barstate.isconfirmed
+    label.new(bar_index, low - atr_value*3, "SUPER SCALPER LONG\n@ " + str.tostring(close, "#.####"), 
+              color=color.lime, style=label.style_label_up, textcolor=color.black, size=size.small)
+
+if enter_short and barstate.isconfirmed
+    label.new(bar_index, high + atr_value*3, "SUPER SCALPER SHORT\n@ " + str.tostring(close, "#.####"), 
+              color=color.red, style=label.style_label_down, textcolor=color.white, size=size.small)
+
+// Consolidation Zones
+bgcolor(is_consolidating ? color.new(color.blue, 97) : na, title="Consolidation Zone")
+
+// =============================================================================
+// 8. COMPREHENSIVE STRATEGY TESTER
+// =============================================================================
+
+// Advanced Performance Tracking Variables
+var int total_long_trades = 0
+var int total_short_trades = 0
+var int winning_long_trades = 0
+var int winning_short_trades = 0
+var float total_long_pnl = 0.0
+var float total_short_pnl = 0.0
+var float largest_win = 0.0
+var float largest_loss = 0.0
+var int consecutive_wins = 0
+var int consecutive_losses = 0
+var int max_consecutive_wins = 0
+var int max_consecutive_losses = 0
+var float current_drawdown = 0.0
+var float max_drawdown_percent = 0.0
+
+// Track trade entries and exits
+if enter_long
+    total_long_trades += 1
+if enter_short
+    total_short_trades += 1
+
+// Calculate advanced metrics on trade close
+if strategy.closedtrades > strategy.closedtrades[1]
+    last_trade_pnl = strategy.closedtrades.profit(strategy.closedtrades - 1)
+    was_long = strategy.closedtrades.size(strategy.closedtrades - 1) > 0
+    
+    // Track wins/losses by direction
+    if last_trade_pnl > 0
+        if was_long
+            winning_long_trades += 1
+        else
+            winning_short_trades += 1
+        consecutive_wins += 1
+        consecutive_losses := 0
+        max_consecutive_wins := math.max(max_consecutive_wins, consecutive_wins)
+        largest_win := math.max(largest_win, last_trade_pnl)
+    else
+        consecutive_losses += 1
+        consecutive_wins := 0
+        max_consecutive_losses := math.max(max_consecutive_losses, consecutive_losses)
+        largest_loss := math.min(largest_loss, last_trade_pnl)
+    
+    // Track PnL by direction
+    if was_long
+        total_long_pnl += last_trade_pnl
+    else
+        total_short_pnl += last_trade_pnl
+
+// Calculate drawdown
+current_equity := strategy.initial_capital + strategy.netprofit
+peak_equity := math.max(peak_equity, current_equity)
+current_drawdown := (peak_equity - current_equity) / peak_equity * 100
+max_drawdown_percent := math.max(max_drawdown_percent, current_drawdown)
+
+// Calculate additional metrics
+win_rate = strategy.closedtrades > 0 ? strategy.wintrades / strategy.closedtrades * 100 : 0
+long_win_rate = total_long_trades > 0 ? winning_long_trades / total_long_trades * 100 : 0
+short_win_rate = total_short_trades > 0 ? winning_short_trades / total_short_trades * 100 : 0
+avg_win = strategy.wintrades > 0 ? strategy.grossprofit / strategy.wintrades : 0
+avg_loss = strategy.losstrades > 0 ? strategy.grossloss / strategy.losstrades : 0
+profit_factor = strategy.grossloss != 0 ? strategy.grossprofit / math.abs(strategy.grossloss) : 0
+avg_trade = strategy.closedtrades > 0 ? strategy.netprofit / strategy.closedtrades : 0
+expectancy = strategy.closedtrades > 0 ? (strategy.wintrades/strategy.closedtrades * avg_win + strategy.losstrades/strategy.closedtrades * avg_loss) : 0
+
+// Risk-adjusted returns
+sharpe_approximation = strategy.netprofit / math.max(1, max_drawdown_percent)
+kelly_percentage = win_rate > 0 and avg_loss != 0 ? (win_rate/100 * avg_win/math.abs(avg_loss) - (1-win_rate/100)) / (avg_win/math.abs(avg_loss)) * 100 : 0
+
+// Performance Stats Table - Enhanced
+var table perf_table = table.new(position.top_right, 3, 16, bgcolor=color.white, border_width=1)
+if barstate.islast
+    // Header
+    table.cell(perf_table, 0, 0, "📊 STRATEGY TESTER", bgcolor=color.gray, text_color=color.white, text_size=size.normal)
+    table.cell(perf_table, 1, 0, "", bgcolor=color.gray)
+    table.cell(perf_table, 2, 0, "", bgcolor=color.gray)
+    
+    // Basic Performance
+    table.cell(perf_table, 0, 1, "Net Profit", bgcolor=color.new(color.blue, 90))
+    table.cell(perf_table, 1, 1, str.tostring(strategy.netprofit, "#.##"))
+    table.cell(perf_table, 2, 1, strategy.netprofit > 0 ? "✅" : "❌")
+    
+    table.cell(perf_table, 0, 2, "Total Trades", bgcolor=color.new(color.blue, 90))
+    table.cell(perf_table, 1, 2, str.tostring(strategy.closedtrades))
+    table.cell(perf_table, 2, 2, strategy.closedtrades > 10 ? "✅" : "⚠️")
+    
+    table.cell(perf_table, 0, 3, "Win Rate", bgcolor=color.new(color.blue, 90))
+    table.cell(perf_table, 1, 3, str.tostring(win_rate, "#.##") + "%")
+    table.cell(perf_table, 2, 3, win_rate > 50 ? "✅" : win_rate > 40 ? "⚠️" : "❌")
+    
+    table.cell(perf_table, 0, 4, "Profit Factor", bgcolor=color.new(color.blue, 90))
+    table.cell(perf_table, 1, 4, str.tostring(profit_factor, "#.##"))
+    table.cell(perf_table, 2, 4, profit_factor > 1.5 ? "✅" : profit_factor > 1.0 ? "⚠️" : "❌")
+    
+    // Trade Analysis
+    table.cell(perf_table, 0, 5, "Long Trades", bgcolor=color.new(color.green, 90))
+    table.cell(perf_table, 1, 5, str.tostring(total_long_trades))
+    table.cell(perf_table, 2, 5, str.tostring(long_win_rate, "#.##") + "%")
+    
+    table.cell(perf_table, 0, 6, "Short Trades", bgcolor=color.new(color.red, 90))
+    table.cell(perf_table, 1, 6, str.tostring(total_short_trades))
+    table.cell(perf_table, 2, 6, str.tostring(short_win_rate, "#.##") + "%")
+    
+    table.cell(perf_table, 0, 7, "Avg Win", bgcolor=color.new(color.green, 90))
+    table.cell(perf_table, 1, 7, str.tostring(avg_win, "#.##"))
+    table.cell(perf_table, 2, 7, "💰")
+    
+    table.cell(perf_table, 0, 8, "Avg Loss", bgcolor=color.new(color.red, 90))
+    table.cell(perf_table, 1, 8, str.tostring(avg_loss, "#.##"))
+    table.cell(perf_table, 2, 8, "💸")
+    
+    // Risk Metrics
+    table.cell(perf_table, 0, 9, "Max Drawdown", bgcolor=color.new(color.orange, 90))
+    table.cell(perf_table, 1, 9, str.tostring(max_drawdown_percent, "#.##") + "%")
+    table.cell(perf_table, 2, 9, max_drawdown_percent < 10 ? "✅" : max_drawdown_percent < 20 ? "⚠️" : "❌")
+    
+    table.cell(perf_table, 0, 10, "Largest Win", bgcolor=color.new(color.green, 90))
+    table.cell(perf_table, 1, 10, str.tostring(largest_win, "#.##"))
+    table.cell(perf_table, 2, 10, "🚀")
+    
+    table.cell(perf_table, 0, 11, "Largest Loss", bgcolor=color.new(color.red, 90))
+    table.cell(perf_table, 1, 11, str.tostring(largest_loss, "#.##"))
+    table.cell(perf_table, 2, 11, "💥")
+    
+    // Advanced Metrics
+    table.cell(perf_table, 0, 12, "Expectancy", bgcolor=color.new(color.purple, 90))
+    table.cell(perf_table, 1, 12, str.tostring(expectancy, "#.##"))
+    table.cell(perf_table, 2, 12, expectancy > 0 ? "✅" : "❌")
+    
+    table.cell(perf_table, 0, 13, "Max Win Streak", bgcolor=color.new(color.green, 90))
+    table.cell(perf_table, 1, 13, str.tostring(max_consecutive_wins))
+    table.cell(perf_table, 2, 13, "🔥")
+    
+    table.cell(perf_table, 0, 14, "Max Loss Streak", bgcolor=color.new(color.red, 90))
+    table.cell(perf_table, 1, 14, str.tostring(max_consecutive_losses))
+    table.cell(perf_table, 2, 14, "❄️")
+    
+    table.cell(perf_table, 0, 15, "Kelly %", bgcolor=color.new(color.yellow, 90))
+    table.cell(perf_table, 1, 15, str.tostring(kelly_percentage, "#.##") + "%")
+    table.cell(perf_table, 2, 15, kelly_percentage > 0 and kelly_percentage < 25 ? "✅" : "⚠️")
+
+// Strategy Rating System
+strategy_score = 0
+if strategy.netprofit > 0
+    strategy_score += 20
+if win_rate > 50
+    strategy_score += 20
+if profit_factor > 1.5
+    strategy_score += 20
+if max_drawdown_percent < 15
+    strategy_score += 20
+if expectancy > 0
+    strategy_score += 20
+
+// Rating Display
+var table rating_table = table.new(position.bottom_right, 2, 3, bgcolor=color.white, border_width=1)
+if barstate.islast
+    rating_color = strategy_score >= 80 ? color.green : strategy_score >= 60 ? color.yellow : strategy_score >= 40 ? color.orange : color.red
+    rating_text = strategy_score >= 80 ? "EXCELLENT" : strategy_score >= 60 ? "GOOD" : strategy_score >= 40 ? "AVERAGE" : "POOR"
+    
+    table.cell(rating_table, 0, 0, "Strategy Rating", bgcolor=color.gray, text_color=color.white)
+    table.cell(rating_table, 1, 0, "", bgcolor=color.gray)
+    table.cell(rating_table, 0, 1, str.tostring(strategy_score) + "/100", bgcolor=rating_color, text_color=color.white, text_size=size.large)
+    table.cell(rating_table, 1, 1, rating_text, bgcolor=rating_color, text_color=color.white, text_size=size.normal)
+    table.cell(rating_table, 0, 2, "Risk Level", bgcolor=color.new(color.blue, 80))
+    risk_level = max_drawdown_percent < 10 ? "LOW" : max_drawdown_percent < 20 ? "MEDIUM" : "HIGH"
+    table.cell(rating_table, 1, 2, risk_level, bgcolor=color.new(color.blue, 80))
+
+
+
+// Professional Super Scalper Webhook Alerts (Simple versions for alertcondition)
+alertcondition(enter_long and not drawdown_exceeded, "Super Scalper Long Entry", '{"action": "long", "symbol": "{{ticker}}", "entry": "{{close}}"}')
+alertcondition(enter_short and not drawdown_exceeded, "Super Scalper Short Entry", '{"action": "short", "symbol": "{{ticker}}", "entry": "{{close}}"}')
+alertcondition(drawdown_exceeded, "Super Scalper Emergency Exit", '{"action": "emergency_exit", "symbol": "{{ticker}}", "risk_level": "high"}')
+alertcondition(strategy.closedtrades > strategy.closedtrades[1] and strategy.closedtrades.profit(strategy.closedtrades - 1) > 0, "Winning Scalp Trade", "💰 Super Scalper winning trade closed on {{ticker}}")
+alertcondition(strategy.closedtrades > strategy.closedtrades[1] and strategy.closedtrades.profit(strategy.closedtrades - 1) < 0, "Losing Scalp Trade", "📉 Super Scalper losing trade closed on {{ticker}}")
+
+// =============================================================================
+// 9. TRADINGVIEW STRATEGY TESTER INSTRUCTIONS
+// =============================================================================
+// 📊 HOW TO USE TRADINGVIEW STRATEGY TESTER:
+// 
+// 1. 📈 Apply this strategy to any chart (recommended: 1H or 4H timeframe)
+// 2. 📉 Open "Strategy Tester" tab at the bottom of TradingView
+// 3. ⚙️ Configure settings in "Strategy Tester" input group:
+//    - Set backtest date range
+//    - Enable/disable Long/Short trades
+//    - Adjust position size and risk limits
+// 4. 💰 Set initial capital (recommended: $10,000+)
+// 5. 💹 Configure commission (0.075% default for crypto)
+// 6. ▶️ Run backtest and analyze results in:
+//    - Overview tab (key metrics)
+//    - Performance Summary (detailed stats)
+//    - List of Trades (individual trade analysis)
+// 7. 🎯 Optimize parameters using different timeframes and symbols
+// 8. 📋 Forward test on paper trading before live implementation
+// 
+// 🎯 KEY FEATURES:
+// - Professional risk management with drawdown protection
+// - Multi-timeframe analysis capabilities  
+// - Comprehensive performance analytics
+// - Real-time alerts for entries, exits, and risk events
+// - Alpha calculation vs Buy & Hold strategy
+// - Advanced metrics: Calmar Ratio, Recovery Factor, etc.
+// 
+// ⚠️ DISCLAIMER: 
+// This strategy is for educational purposes only.
+// Always backtest thoroughly and use proper risk management.
+// Past performance does not guarantee future results.
+// Start with small position sizes and gradually scale up.

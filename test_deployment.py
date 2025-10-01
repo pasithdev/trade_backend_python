@@ -34,7 +34,7 @@ def test_app_startup():
     try:
         # Set production environment
         os.environ['ENVIRONMENT'] = 'production'
-        os.environ['PORT'] = '8080'
+        os.environ['PORT'] = '80'
         
         # Import the app
         from src.main import app

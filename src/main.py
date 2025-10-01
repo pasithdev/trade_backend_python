@@ -93,7 +93,7 @@ def health_check():
             'healthcheck', logging.INFO, '', 0, '', (), None
         )),
         'environment': os.getenv('ENVIRONMENT', 'development'),
-        'port': os.getenv('PORT', '8080')
+        'port': os.getenv('PORT', '80')
     }), 200
 
 # API status endpoint
@@ -103,7 +103,7 @@ def api_status():
         'status': 'online',
         'environment': os.getenv('ENVIRONMENT', 'development'),
         'version': '1.0.0',
-        'port': os.getenv('PORT', '8080'),
+        'port': os.getenv('PORT', '80'),
         'workers': os.getenv('WEB_CONCURRENCY', '2')
     }), 200
 
@@ -161,6 +161,6 @@ def serve(path):
 
 if __name__ == '__main__':
     # Development server settings
-    port = int(os.getenv('PORT', 8080))
+    port = int(os.getenv('PORT', 5000))
     debug = os.getenv('ENVIRONMENT') != 'production'
     app.run(host='0.0.0.0', port=port, debug=debug)

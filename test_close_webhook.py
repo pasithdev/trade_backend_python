@@ -11,7 +11,7 @@ def test_close_webhook():
     """Test the close webhook with sample data"""
     
     # Webhook URL (adjust port if needed)
-    webhook_url = "http://localhost:5000/api/binance/state-aware-ma-cross-webhook"
+    webhook_url = "http://localhost:80/api/binance/state-aware-ma-cross-webhook"
     
     # Test data for close signal
     test_data = {
@@ -62,7 +62,7 @@ def test_close_webhook():
 def test_get_info():
     """Get webhook information"""
     
-    info_url = "http://localhost:5000/api/binance/test-state-aware-close"
+    info_url = "http://localhost:80/api/binance/test-state-aware-close"
     
     try:
         response = requests.post(info_url, timeout=10)

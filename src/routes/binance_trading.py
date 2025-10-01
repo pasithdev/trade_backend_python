@@ -19,6 +19,8 @@ trading_config = {
     'testnet': True,  # Use testnet by default for safety
     'default_tp_percentage': 2.0,  # 2% take profit
     'default_sl_percentage': 1.0,  # 1% stop loss
+    'default_quantity_percentage': 0.20,  # 20% of balance (new default)
+    'default_leverage': 10,  # 10x leverage (new default)
     'min_order_value': 10.0,  # Minimum order value in USDT
     'max_order_value': 1000.0,  # Maximum order value in USDT
     'leverage': 10,  # Default leverage for futures trading
@@ -106,10 +108,13 @@ def init_binance_client(api_key, api_secret, testnet=True):
         # Fix event loop issue for Flask threading
         try:
             loop = asyncio.get_event_loop()
+            if loop.is_closed():
+                raise RuntimeError("Event loop is closed")
         except RuntimeError:
-            # Create new event loop if none exists
+            # Create new event loop if none exists or if closed
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
+            logger.info("Created new asyncio event loop for thread")
         
         if testnet:
             # For testnet, we need to specify the testnet base URL
@@ -1123,6 +1128,45 @@ def close_opposite_position(symbol, new_action):
         logger.error(f"Error closing opposite position: {str(e)}")
         return {'success': False, 'error': f'Error closing opposite position: {str(e)}'}
 
+def get_symbol_minimum_requirements(symbol):
+    """
+    Get minimum requirements for a symbol
+    
+    Args:
+        symbol: Trading symbol (e.g., 'BTCUSDT')
+    
+    Returns:
+        dict: Minimum quantity, price, and other requirements
+    """
+    global binance_client
+    
+    try:
+        exchange_info = call_binance_api(binance_client.futures_exchange_info)
+        symbol_info = next(s for s in exchange_info['symbols'] if s['symbol'] == symbol)
+        
+        # Extract filters
+        lot_size_filter = next(f for f in symbol_info['filters'] if f['filterType'] == 'LOT_SIZE')
+        price_filter = next(f for f in symbol_info['filters'] if f['filterType'] == 'PRICE_FILTER')
+        min_notional_filter = next((f for f in symbol_info['filters'] if f['filterType'] == 'MIN_NOTIONAL'), None)
+        
+        return {
+            'success': True,
+            'min_qty': float(lot_size_filter['minQty']),
+            'max_qty': float(lot_size_filter['maxQty']),
+            'step_size': float(lot_size_filter['stepSize']),
+            'min_price': float(price_filter['minPrice']),
+            'max_price': float(price_filter['maxPrice']),
+            'tick_size': float(price_filter['tickSize']),
+            'min_notional': float(min_notional_filter['minNotional']) if min_notional_filter else 0,
+            'symbol_info': symbol_info
+        }
+    except Exception as e:
+        logger.error(f"Failed to get symbol requirements for {symbol}: {e}")
+        return {
+            'success': False,
+            'error': str(e)
+        }
+
 def calculate_position_quantity(symbol, balance_percentage=0.20, leverage=10):
     """
     Calculate position quantity based on account balance percentage
@@ -1175,14 +1219,21 @@ def calculate_position_quantity(symbol, balance_percentage=0.20, leverage=10):
         # Step 6: Validate minimum quantity
         min_qty = float(lot_size_filter['minQty'])
         if final_quantity < min_qty:
+            # Suggest minimum balance needed for this symbol
+            min_position_value = min_qty * current_price
+            min_balance_needed = min_position_value / leverage
+            
             return {
                 'success': False,
-                'error': f'Calculated quantity {final_quantity} is below minimum {min_qty} for {symbol}',
+                'error': f'Calculated quantity {final_quantity} is below minimum {min_qty} for {symbol}. Need at least {min_balance_needed:.2f} USDT available balance (or {min_balance_needed/available_balance*100:.1f}% of current balance) to trade this symbol with {leverage}x leverage.',
                 'details': {
                     'calculated_quantity': final_quantity,
                     'minimum_quantity': min_qty,
+                    'minimum_balance_needed': min_balance_needed,
+                    'minimum_balance_percentage': min_balance_needed/available_balance if available_balance > 0 else 1.0,
                     'position_value_usdt': position_value_usdt,
-                    'current_price': current_price
+                    'current_price': current_price,
+                    'suggestion': f'Increase balance_percentage to at least {min_balance_needed/available_balance:.3f} or use a different symbol with lower minimum quantity'
                 }
             }
         
@@ -1700,10 +1751,15 @@ def state_aware_ma_cross_webhook():
         # Step 1: Calculate position quantity based on account balance
         quantity_result = calculate_position_quantity(symbol, balance_percentage, leverage)
         if not quantity_result['success']:
+            # Log the specific error for debugging
+            logger.error(f"Quantity calculation failed for {symbol}: {quantity_result['error']}")
+            logger.error(f"Details: {quantity_result.get('details', {})}")
+            
             return jsonify({
                 'success': False,
                 'error': f'Failed to calculate position quantity: {quantity_result["error"]}',
-                'details': quantity_result['details']
+                'details': quantity_result['details'],
+                'webhook_data': data  # Include original webhook data for debugging
             }), 400
         
         quantity = quantity_result['quantity']
@@ -1767,16 +1823,40 @@ def state_aware_ma_cross_webhook():
         })
         
     except BinanceAPIException as e:
-        logger.error(f"Binance API error in State-aware MA Cross webhook: {e.message}")
+        error_code = getattr(e, 'code', 'Unknown')
+        error_message = getattr(e, 'message', str(e))
+        
+        logger.error(f"Binance API error in State-aware MA Cross webhook: Code {error_code} - {error_message}")
+        
+        # Provide specific guidance based on error codes
+        suggestions = []
+        if error_code == -1121:  # Invalid symbol
+            suggestions.append("Check if the symbol exists and is available for futures trading")
+        elif error_code == -1111:  # Precision error
+            suggestions.append("Check quantity precision - use proper decimal places")
+        elif error_code == -2010:  # Insufficient balance
+            suggestions.append("Increase your account balance or reduce position size")
+        elif error_code == -1013:  # Invalid quantity (too small/large)
+            suggestions.append("Adjust balance_percentage - quantity may be too small or too large for this symbol")
+        elif error_code == -4131:  # Percent price protection
+            suggestions.append("Market price moved too much - retry with current market conditions")
+        
         return jsonify({
             'success': False,
-            'error': f'Binance API error: {e.message}'
+            'error': f'Binance API error (Code {error_code}): {error_message}',
+            'suggestions': suggestions,
+            'webhook_data': data
         }), 400
     except BinanceOrderException as e:
-        logger.error(f"Binance order error in State-aware MA Cross webhook: {e.message}")
+        error_code = getattr(e, 'code', 'Unknown')
+        error_message = getattr(e, 'message', str(e))
+        
+        logger.error(f"Binance order error in State-aware MA Cross webhook: Code {error_code} - {error_message}")
+        
         return jsonify({
             'success': False,
-            'error': f'Order error: {e.message}'
+            'error': f'Order error (Code {error_code}): {error_message}',
+            'webhook_data': data
         }), 400
     except Exception as e:
         logger.error(f"Error in State-aware MA Cross webhook: {str(e)}")
@@ -1784,6 +1864,886 @@ def state_aware_ma_cross_webhook():
             'success': False,
             'error': f'State-aware MA Cross webhook error: {str(e)}'
         }), 500
+
+@binance_bp.route('/binance/smart-webhook', methods=['POST'])
+@binance_bp.route('/tradingview/binance/smart-webhook', methods=['POST']) 
+def smart_webhook():
+    """
+    Smart webhook endpoint with configurable quantity percentage and leverage
+    Defaults: quantity_percent = 20%, leverage = 10x
+    Automatically converts percentage to real quantity for the specific symbol
+    """
+    global binance_client, active_orders
+    
+    if not binance_client:
+        return jsonify({
+            'success': False,
+            'error': 'Binance client not configured. Please configure API credentials first.'
+        }), 400
+    
+    try:
+        # Get the webhook data
+        logger.info(f"Smart webhook called - Content-Type: {request.headers.get('Content-Type', 'Unknown')}")
+        
+        # Handle different content types
+        content_type = request.headers.get('Content-Type', '')
+        if 'application/json' in content_type:
+            data = request.get_json()
+        else:
+            # Handle plain text or other formats from TradingView
+            raw_data = request.get_data(as_text=True)
+            logger.info(f"Raw webhook data received: {raw_data}")
+            try:
+                import json
+                data = json.loads(raw_data)
+            except json.JSONDecodeError:
+                logger.error(f"Failed to parse webhook data as JSON: {raw_data}")
+                return jsonify({
+                    'success': False,
+                    'error': f'Invalid JSON format in webhook data: {raw_data}'
+                }), 400
+        
+        if not data:
+            logger.error("No webhook data received from TradingView")
+            return jsonify({
+                'success': False,
+                'error': 'No webhook data received'
+            }), 400
+        
+        logger.info(f"Parsed smart webhook data: {data}")
+        
+        # Extract parameters with defaults
+        try:
+            symbol = str(data.get('symbol', '')).upper()
+            action = str(data.get('action', '')).lower()
+            
+            # Set defaults: 20% quantity, 10x leverage
+            quantity_percent = float(data.get('quantity_percent', data.get('balance_percentage', 0.20)))  # Default 20%
+            leverage = int(data.get('leverage', 10))  # Default 10x leverage
+            
+            entry_price = float(data.get('entry', data.get('price', 0)))
+            
+            # Optional stop loss and take profit percentages
+            sl_percent = float(data.get('sl_percent', trading_config.get('default_sl_percentage', 1.0)))
+            tp_percent = float(data.get('tp_percent', trading_config.get('default_tp_percentage', 2.0)))
+            
+        except (ValueError, TypeError) as param_error:
+            logger.error(f"Error parsing smart webhook parameters: {param_error}, data: {data}")
+            return jsonify({
+                'success': False,
+                'error': f'Invalid parameter format in webhook data: {str(param_error)}'
+            }), 400
+        
+        # Validate required parameters
+        if not symbol or action not in ['buy', 'sell', 'long', 'short', 'close']:
+            return jsonify({
+                'success': False,
+                'error': 'Invalid symbol or action. Expected "buy", "sell", "long", "short", or "close"'
+            }), 400
+        
+        # Normalize action (long = buy, short = sell)
+        if action == 'long':
+            action = 'buy'
+        elif action == 'short':
+            action = 'sell'
+        
+        # Validate quantity percentage
+        if action in ['buy', 'sell'] and (quantity_percent <= 0 or quantity_percent > 1):
+            return jsonify({
+                'success': False,
+                'error': 'Invalid quantity_percent. Must be between 0.01 (1%) and 1.0 (100%)'
+            }), 400
+        
+        # Ensure symbol format is correct
+        if not symbol.endswith('USDT'):
+            symbol = f"{symbol}USDT"
+        
+        logger.info(f"Smart webhook processing: {action} {symbol} using {quantity_percent*100}% balance with {leverage}x leverage")
+        
+        # Handle close action differently
+        if action == 'close':
+            return handle_close_position(symbol)
+        
+        # Step 1: Get symbol requirements and validate feasibility
+        symbol_requirements = get_symbol_minimum_requirements(symbol)
+        if not symbol_requirements['success']:
+            return jsonify({
+                'success': False,
+                'error': f'Failed to get symbol requirements: {symbol_requirements["error"]}'
+            }), 400
+        
+        # Step 2: Calculate position quantity based on account balance
+        quantity_result = calculate_position_quantity(symbol, quantity_percent, leverage)
+        if not quantity_result['success']:
+            # Log the specific error for debugging
+            logger.error(f"Quantity calculation failed for {symbol}: {quantity_result['error']}")
+            logger.error(f"Details: {quantity_result.get('details', {})}")
+            
+            # Suggest alternative percentage if minimum not met
+            suggestions = []
+            details = quantity_result.get('details', {})
+            if 'minimum_balance_percentage' in details:
+                min_percent = details['minimum_balance_percentage']
+                suggestions.append(f"Try using quantity_percent: {min_percent:.3f} (minimum {min_percent*100:.1f}%)")
+            
+            return jsonify({
+                'success': False,
+                'error': f'Failed to calculate position quantity: {quantity_result["error"]}',
+                'details': quantity_result['details'],
+                'suggestions': suggestions,
+                'webhook_data': data
+            }), 400
+        
+        quantity = quantity_result['quantity']
+        calculation_details = quantity_result['details']
+        
+        logger.info(f"Calculated quantity: {quantity} {symbol} (Position value: {calculation_details['position_value_usdt']} USDT)")
+        
+        # Step 3: Close opposite position first
+        close_result = close_opposite_position(symbol, action)
+        if not close_result['success']:
+            return jsonify({
+                'success': False,
+                'error': f'Failed to close existing position: {close_result["error"]}'
+            }), 400
+        
+        # Step 4: Set leverage for the symbol
+        try:
+            call_binance_api(binance_client.futures_change_leverage, symbol=symbol, leverage=leverage)
+            logger.info(f"Leverage set to {leverage}x for {symbol}")
+        except Exception as lev_error:
+            logger.warning(f"Could not set leverage for {symbol}: {lev_error}")
+        
+        # Step 5: Set margin type
+        try:
+            call_binance_api(binance_client.futures_change_margin_type, symbol=symbol, marginType=trading_config['margin_type'])
+            logger.info(f"Margin type set to {trading_config['margin_type']} for {symbol}")
+        except Exception as margin_error:
+            logger.warning(f"Could not set margin type for {symbol} (may already be set): {margin_error}")
+        
+        # Step 6: Place the main market order (buy or sell)
+        order_side = SIDE_BUY if action == 'buy' else SIDE_SELL
+        main_order = call_binance_api(binance_client.futures_create_order,
+            symbol=symbol,
+            side=order_side,
+            type=ORDER_TYPE_MARKET,
+            quantity=quantity
+        )
+        
+        logger.info(f"Smart webhook {action} order placed: {main_order}")
+        
+        # Get current price for response
+        current_price = call_binance_api(binance_client.futures_symbol_ticker, symbol=symbol)['price']
+        
+        # Calculate real quantities and prices for SL/TP if provided
+        entry_fill_price = float(current_price)  # Use current price as approximate fill price
+        
+        sl_price = None
+        tp_price = None
+        if action == 'buy':
+            sl_price = entry_fill_price * (1 - sl_percent / 100) if sl_percent > 0 else None
+            tp_price = entry_fill_price * (1 + tp_percent / 100) if tp_percent > 0 else None
+        else:  # sell
+            sl_price = entry_fill_price * (1 + sl_percent / 100) if sl_percent > 0 else None
+            tp_price = entry_fill_price * (1 - tp_percent / 100) if tp_percent > 0 else None
+        
+        return jsonify({
+            'success': True,
+            'message': f'Smart webhook order executed: {action} {quantity} {symbol}',
+            'trade': {
+                'symbol': symbol,
+                'action': action,
+                'quantity': quantity,
+                'quantity_percent': quantity_percent,
+                'quantity_percent_display': f"{quantity_percent*100}%",
+                'leverage': leverage,
+                'entry_price': entry_price,
+                'current_price': float(current_price),
+                'estimated_fill_price': entry_fill_price,
+                'main_order_id': main_order.get('orderId'),
+                'opposite_position_closed': close_result.get('message', 'No opposite positions'),
+                'stop_loss': {
+                    'enabled': sl_percent > 0,
+                    'percent': sl_percent,
+                    'price': sl_price
+                },
+                'take_profit': {
+                    'enabled': tp_percent > 0,
+                    'percent': tp_percent,
+                    'price': tp_price
+                },
+                'mode': 'smart_webhook',
+                'note': f'Quantity: {quantity_percent*100}% of balance converted to {quantity} {symbol}'
+            },
+            'calculation_details': calculation_details,
+            'symbol_requirements': {
+                'min_quantity': symbol_requirements['min_qty'],
+                'step_size': symbol_requirements['step_size'],
+                'min_notional': symbol_requirements.get('min_notional', 'N/A')
+            },
+            'timestamp': datetime.now().isoformat()
+        })
+        
+    except BinanceAPIException as e:
+        error_code = getattr(e, 'code', 'Unknown')
+        error_message = getattr(e, 'message', str(e))
+        
+        logger.error(f"Binance API error in smart webhook: Code {error_code} - {error_message}")
+        
+        # Provide specific guidance based on error codes
+        suggestions = []
+        if error_code == -1121:  # Invalid symbol
+            suggestions.append("Check if the symbol exists and is available for futures trading")
+        elif error_code == -1111:  # Precision error
+            suggestions.append("Check quantity precision - use proper decimal places")
+        elif error_code == -2010:  # Insufficient balance
+            suggestions.append("Increase your account balance or reduce quantity_percent")
+        elif error_code == -1013:  # Invalid quantity (too small/large)
+            suggestions.append("Adjust quantity_percent - calculated quantity may be too small or too large for this symbol")
+        elif error_code == -4131:  # Percent price protection
+            suggestions.append("Market price moved too much - retry with current market conditions")
+        
+        return jsonify({
+            'success': False,
+            'error': f'Binance API error (Code {error_code}): {error_message}',
+            'suggestions': suggestions,
+            'webhook_data': data
+        }), 400
+    except BinanceOrderException as e:
+        error_code = getattr(e, 'code', 'Unknown')
+        error_message = getattr(e, 'message', str(e))
+        
+        logger.error(f"Binance order error in smart webhook: Code {error_code} - {error_message}")
+        
+        return jsonify({
+            'success': False,
+            'error': f'Order error (Code {error_code}): {error_message}',
+            'webhook_data': data
+        }), 400
+    except Exception as e:
+        logger.error(f"Error in smart webhook: {str(e)}")
+        return jsonify({
+            'success': False,
+            'error': f'Smart webhook error: {str(e)}'
+        }), 500
+
+@binance_bp.route('/binance/super-scalper-webhook', methods=['POST'])
+@binance_bp.route('/tradingview/binance/super-scalper-webhook', methods=['POST'])
+def super_scalper_webhook():
+    """
+    Professional Crypto Super Scalper webhook endpoint
+    Supports advanced multi-factor trading signals with position management
+    Handles: Long Entry, Short Entry, Exit All, Risk Management
+    """
+    global binance_client, active_orders
+    
+    if not binance_client:
+        return jsonify({
+            'success': False,
+            'error': 'Binance client not configured. Please configure API credentials first.'
+        }), 400
+    
+    try:
+        # Get the webhook data
+        logger.info(f"Super Scalper webhook called - Content-Type: {request.headers.get('Content-Type', 'Unknown')}")
+        
+        # Handle different content types
+        content_type = request.headers.get('Content-Type', '')
+        if 'application/json' in content_type:
+            data = request.get_json()
+        else:
+            # Handle plain text or other formats from TradingView
+            raw_data = request.get_data(as_text=True)
+            logger.info(f"Raw Super Scalper webhook data received: {raw_data}")
+            try:
+                import json
+                data = json.loads(raw_data)
+            except json.JSONDecodeError:
+                logger.error(f"Failed to parse Super Scalper webhook data as JSON: {raw_data}")
+                return jsonify({
+                    'success': False,
+                    'error': f'Invalid JSON format in webhook data: {raw_data}'
+                }), 400
+        
+        if not data:
+            logger.error("No webhook data received from Super Scalper strategy")
+            return jsonify({
+                'success': False,
+                'error': 'No webhook data received from Super Scalper strategy'
+            }), 400
+        
+        logger.info(f"Parsed Super Scalper webhook data: {data}")
+        
+        # Extract parameters with Super Scalper specific defaults
+        try:
+            symbol = str(data.get('symbol', '')).upper()
+            action = str(data.get('action', '')).lower()
+            
+            # Super Scalper specific settings (aggressive scalping parameters)
+            quantity_percent = float(data.get('quantity_percent', data.get('balance_percentage', 0.15)))  # Default 15% for scalping
+            leverage = int(data.get('leverage', 20))  # Default 20x leverage for scalping
+            
+            entry_price = float(data.get('entry', data.get('price', 0)))
+            
+            # Super Scalper risk management (tighter stops, quicker profits)
+            sl_percent = float(data.get('sl_percent', 0.8))  # Tighter stop loss for scalping
+            tp_percent = float(data.get('tp_percent', 1.2))  # Quick take profit for scalping
+            
+            # Super Scalper specific parameters
+            risk_level = str(data.get('risk_level', 'medium')).lower()  # low, medium, high
+            signal_strength = str(data.get('signal_strength', 'normal')).lower()  # weak, normal, strong
+            market_condition = str(data.get('market_condition', 'normal')).lower()  # trending, ranging, volatile, normal
+            
+        except (ValueError, TypeError) as param_error:
+            logger.error(f"Error parsing Super Scalper webhook parameters: {param_error}, data: {data}")
+            return jsonify({
+                'success': False,
+                'error': f'Invalid parameter format in Super Scalper webhook data: {str(param_error)}'
+            }), 400
+        
+        # Validate required parameters
+        if not symbol or action not in ['buy', 'sell', 'long', 'short', 'close', 'exit', 'emergency_exit']:
+            return jsonify({
+                'success': False,
+                'error': 'Invalid symbol or action. Super Scalper expects: "buy", "sell", "long", "short", "close", "exit", or "emergency_exit"'
+            }), 400
+        
+        # Normalize action (long = buy, short = sell)
+        if action == 'long':
+            action = 'buy'
+        elif action == 'short':
+            action = 'sell'
+        elif action in ['exit', 'emergency_exit']:
+            action = 'close'
+        
+        # Adjust position size based on signal strength and risk level
+        if signal_strength == 'strong':
+            quantity_percent *= 1.5  # Increase position for strong signals
+        elif signal_strength == 'weak':
+            quantity_percent *= 0.7  # Reduce position for weak signals
+            
+        if risk_level == 'high':
+            quantity_percent *= 0.6  # Reduce position for high risk
+            leverage = min(leverage, 10)  # Cap leverage for high risk
+        elif risk_level == 'low':
+            quantity_percent *= 1.2  # Slightly increase for low risk
+        
+        # Market condition adjustments
+        if market_condition == 'volatile':
+            sl_percent *= 1.5  # Wider stops in volatile markets
+            tp_percent *= 0.8  # Quicker profits in volatile markets
+        elif market_condition == 'ranging':
+            tp_percent *= 1.3  # Wider targets in ranging markets
+        
+        # Validate adjusted quantity percentage
+        quantity_percent = min(quantity_percent, 0.5)  # Cap at 50% for safety
+        if action in ['buy', 'sell'] and (quantity_percent <= 0 or quantity_percent > 0.5):
+            return jsonify({
+                'success': False,
+                'error': 'Invalid quantity_percent after adjustments. Must be between 0.01 (1%) and 0.5 (50%) for Super Scalper'
+            }), 400
+        
+        # Ensure symbol format is correct
+        if not symbol.endswith('USDT'):
+            symbol = f"{symbol}USDT"
+        
+        logger.info(f"Super Scalper processing: {action} {symbol} using {quantity_percent*100:.1f}% balance with {leverage}x leverage")
+        logger.info(f"Signal strength: {signal_strength}, Risk level: {risk_level}, Market condition: {market_condition}")
+        
+        # Handle close/exit actions
+        if action == 'close':
+            close_result = close_all_positions_for_symbol(symbol)
+            return jsonify({
+                'success': True,
+                'message': f'Super Scalper close executed for {symbol}',
+                'action': 'close_all',
+                'symbol': symbol,
+                'closed_positions': close_result.get('details', []),
+                'signal_info': {
+                    'signal_strength': signal_strength,
+                    'risk_level': risk_level,
+                    'market_condition': market_condition
+                },
+                'timestamp': datetime.now().isoformat()
+            })
+        
+        # Step 1: Get symbol requirements and validate feasibility
+        symbol_requirements = get_symbol_minimum_requirements(symbol)
+        if not symbol_requirements['success']:
+            return jsonify({
+                'success': False,
+                'error': f'Failed to get symbol requirements: {symbol_requirements["error"]}'
+            }), 400
+        
+        # Step 2: Calculate position quantity based on account balance
+        quantity_result = calculate_position_quantity(symbol, quantity_percent, leverage)
+        if not quantity_result['success']:
+            # Log the specific error for debugging
+            logger.error(f"Super Scalper quantity calculation failed for {symbol}: {quantity_result['error']}")
+            logger.error(f"Details: {quantity_result.get('details', {})}")
+            
+            # Suggest alternative percentage if minimum not met
+            suggestions = []
+            details = quantity_result.get('details', {})
+            if 'minimum_balance_percentage' in details:
+                min_percent = details['minimum_balance_percentage']
+                suggestions.append(f"Try using quantity_percent: {min_percent:.3f} (minimum {min_percent*100:.1f}%)")
+            
+            return jsonify({
+                'success': False,
+                'error': f'Super Scalper quantity calculation failed: {quantity_result["error"]}',
+                'details': quantity_result['details'],
+                'suggestions': suggestions,
+                'webhook_data': data
+            }), 400
+        
+        quantity = quantity_result['quantity']
+        calculation_details = quantity_result['details']
+        
+        logger.info(f"Super Scalper calculated quantity: {quantity} {symbol} (Position value: {calculation_details['position_value_usdt']} USDT)")
+        
+        # Step 3: Close opposite position first (important for scalping)
+        close_result = close_opposite_position(symbol, action)
+        if not close_result['success']:
+            return jsonify({
+                'success': False,
+                'error': f'Failed to close existing position: {close_result["error"]}'
+            }), 400
+        
+        # Step 4: Set leverage for the symbol
+        try:
+            call_binance_api(binance_client.futures_change_leverage, symbol=symbol, leverage=leverage)
+            logger.info(f"Super Scalper leverage set to {leverage}x for {symbol}")
+        except Exception as lev_error:
+            logger.warning(f"Could not set leverage for {symbol}: {lev_error}")
+        
+        # Step 5: Set margin type to ISOLATED for scalping (better risk control)
+        try:
+            call_binance_api(binance_client.futures_change_margin_type, symbol=symbol, marginType='ISOLATED')
+            logger.info(f"Super Scalper margin type set to ISOLATED for {symbol}")
+        except Exception as margin_error:
+            logger.warning(f"Could not set margin type for {symbol} (may already be set): {margin_error}")
+        
+        # Step 6: Place the main market order (buy or sell)
+        order_side = SIDE_BUY if action == 'buy' else SIDE_SELL
+        main_order = call_binance_api(binance_client.futures_create_order,
+            symbol=symbol,
+            side=order_side,
+            type=ORDER_TYPE_MARKET,
+            quantity=quantity
+        )
+        
+        logger.info(f"Super Scalper {action} order placed: {main_order}")
+        
+        # Get current price for response
+        current_price = call_binance_api(binance_client.futures_symbol_ticker, symbol=symbol)['price']
+        
+        # Calculate real quantities and prices for SL/TP
+        entry_fill_price = float(current_price)  # Use current price as approximate fill price
+        
+        sl_price = None
+        tp_price = None
+        if action == 'buy':
+            sl_price = entry_fill_price * (1 - sl_percent / 100) if sl_percent > 0 else None
+            tp_price = entry_fill_price * (1 + tp_percent / 100) if tp_percent > 0 else None
+        else:  # sell
+            sl_price = entry_fill_price * (1 + sl_percent / 100) if sl_percent > 0 else None
+            tp_price = entry_fill_price * (1 - tp_percent / 100) if tp_percent > 0 else None
+        
+        # Place stop loss and take profit orders for scalping
+        sl_order_id = None
+        tp_order_id = None
+        
+        try:
+            if sl_price:
+                sl_side = SIDE_SELL if action == 'buy' else SIDE_BUY
+                sl_order = call_binance_api(binance_client.futures_create_order,
+                    symbol=symbol,
+                    side=sl_side,
+                    type=ORDER_TYPE_STOP_MARKET,
+                    quantity=quantity,
+                    stopPrice=sl_price,
+                    reduceOnly=True
+                )
+                sl_order_id = sl_order.get('orderId')
+                logger.info(f"Super Scalper stop loss placed at {sl_price}")
+        except Exception as sl_error:
+            logger.warning(f"Could not place stop loss: {sl_error}")
+        
+        try:
+            if tp_price:
+                tp_side = SIDE_SELL if action == 'buy' else SIDE_BUY
+                tp_order = call_binance_api(binance_client.futures_create_order,
+                    symbol=symbol,
+                    side=tp_side,
+                    type=ORDER_TYPE_LIMIT,
+                    quantity=quantity,
+                    price=tp_price,
+                    timeInForce=TIME_IN_FORCE_GTC,
+                    reduceOnly=True
+                )
+                tp_order_id = tp_order.get('orderId')
+                logger.info(f"Super Scalper take profit placed at {tp_price}")
+        except Exception as tp_error:
+            logger.warning(f"Could not place take profit: {tp_error}")
+        
+        return jsonify({
+            'success': True,
+            'message': f'Super Scalper order executed: {action} {quantity} {symbol}',
+            'trade': {
+                'symbol': symbol,
+                'action': action,
+                'quantity': quantity,
+                'quantity_percent': quantity_percent,
+                'quantity_percent_display': f"{quantity_percent*100:.1f}%",
+                'leverage': leverage,
+                'entry_price': entry_price,
+                'current_price': float(current_price),
+                'estimated_fill_price': entry_fill_price,
+                'main_order_id': main_order.get('orderId'),
+                'stop_loss_order_id': sl_order_id,
+                'take_profit_order_id': tp_order_id,
+                'opposite_position_closed': close_result.get('message', 'No opposite positions'),
+                'stop_loss': {
+                    'enabled': sl_percent > 0,
+                    'percent': sl_percent,
+                    'price': sl_price
+                },
+                'take_profit': {
+                    'enabled': tp_percent > 0,
+                    'percent': tp_percent,
+                    'price': tp_price
+                },
+                'mode': 'super_scalper',
+                'note': f'Professional scalping with {quantity_percent*100:.1f}% position size'
+            },
+            'signal_analysis': {
+                'signal_strength': signal_strength,
+                'risk_level': risk_level,
+                'market_condition': market_condition,
+                'adjusted_quantity': f"Original: {data.get('quantity_percent', 0.15)*100:.1f}%, Adjusted: {quantity_percent*100:.1f}%",
+                'risk_adjustments': {
+                    'sl_adjusted': market_condition == 'volatile',
+                    'tp_adjusted': market_condition in ['volatile', 'ranging'],
+                    'size_adjusted': signal_strength != 'normal' or risk_level != 'medium'
+                }
+            },
+            'calculation_details': calculation_details,
+            'symbol_requirements': {
+                'min_quantity': symbol_requirements['min_qty'],
+                'step_size': symbol_requirements['step_size'],
+                'min_notional': symbol_requirements.get('min_notional', 'N/A')
+            },
+            'timestamp': datetime.now().isoformat()
+        })
+        
+    except BinanceAPIException as e:
+        error_code = getattr(e, 'code', 'Unknown')
+        error_message = getattr(e, 'message', str(e))
+        
+        logger.error(f"Binance API error in Super Scalper webhook: Code {error_code} - {error_message}")
+        
+        # Provide specific guidance based on error codes
+        suggestions = []
+        if error_code == -1121:  # Invalid symbol
+            suggestions.append("Check if the symbol exists and is available for futures trading")
+        elif error_code == -1111:  # Precision error
+            suggestions.append("Check quantity precision - use proper decimal places")
+        elif error_code == -2010:  # Insufficient balance
+            suggestions.append("Increase your account balance or reduce quantity_percent")
+        elif error_code == -1013:  # Invalid quantity (too small/large)
+            suggestions.append("Adjust quantity_percent - calculated quantity may be too small or too large for this symbol")
+        elif error_code == -4131:  # Percent price protection
+            suggestions.append("Market price moved too much - retry with current market conditions")
+        
+        return jsonify({
+            'success': False,
+            'error': f'Binance API error (Code {error_code}): {error_message}',
+            'suggestions': suggestions,
+            'webhook_data': data
+        }), 400
+    except BinanceOrderException as e:
+        error_code = getattr(e, 'code', 'Unknown')
+        error_message = getattr(e, 'message', str(e))
+        
+        logger.error(f"Binance order error in Super Scalper webhook: Code {error_code} - {error_message}")
+        
+        return jsonify({
+            'success': False,
+            'error': f'Order error (Code {error_code}): {error_message}',
+            'webhook_data': data
+        }), 400
+    except Exception as e:
+        logger.error(f"Error in Super Scalper webhook: {str(e)}")
+        return jsonify({
+            'success': False,
+            'error': f'Super Scalper webhook error: {str(e)}'
+        }), 500
+
+def close_all_positions_for_symbol(symbol):
+    """
+    Close all positions for a specific symbol (for Super Scalper exit signals)
+    """
+    global binance_client
+    
+    try:
+        # Get current positions
+        positions = call_binance_api(binance_client.futures_position_information, symbol=symbol)
+        closed_positions = []
+        
+        for position in positions:
+            position_amt = float(position['positionAmt'])
+            if abs(position_amt) > 0:  # Position exists
+                # Determine close side
+                close_side = SIDE_SELL if position_amt > 0 else SIDE_BUY
+                close_qty = abs(position_amt)
+                
+                # Place market order to close position
+                close_order = call_binance_api(binance_client.futures_create_order,
+                    symbol=symbol,
+                    side=close_side,
+                    type=ORDER_TYPE_MARKET,
+                    quantity=close_qty,
+                    reduceOnly=True
+                )
+                
+                closed_positions.append({
+                    'position_type': 'long' if position_amt > 0 else 'short',
+                    'side': close_side,
+                    'quantity': close_qty,
+                    'order_id': close_order.get('orderId'),
+                    'entry_price': float(position['entryPrice']),
+                    'mark_price': float(position['markPrice']),
+                    'pnl': float(position['unRealizedPnl'])
+                })
+                
+                logger.info(f"Closed {'long' if position_amt > 0 else 'short'} position: {close_qty} {symbol}")
+        
+        # Cancel any open orders for this symbol
+        try:
+            open_orders = call_binance_api(binance_client.futures_get_open_orders, symbol=symbol)
+            for order in open_orders:
+                call_binance_api(binance_client.futures_cancel_order, 
+                    symbol=symbol, 
+                    orderId=order['orderId']
+                )
+                logger.info(f"Cancelled open order: {order['orderId']} for {symbol}")
+        except Exception as cancel_error:
+            logger.warning(f"Could not cancel some orders for {symbol}: {cancel_error}")
+        
+        return {
+            'success': True,
+            'message': f'Closed {len(closed_positions)} position(s) for {symbol}',
+            'details': closed_positions
+        }
+        
+    except Exception as e:
+        logger.error(f"Error closing positions for {symbol}: {str(e)}")
+        return {
+            'success': False,
+            'error': f'Failed to close positions for {symbol}: {str(e)}'
+        }
+
+@binance_bp.route('/binance/test-super-scalper-webhook', methods=['POST'])
+def test_super_scalper_webhook():
+    """Test the Super Scalper webhook with sample professional scalping data"""
+    # Sample data for different Super Scalper scenarios
+    sample_strong_long = {
+        "action": "long",
+        "symbol": "ETHUSDT",
+        "quantity_percent": 0.15,  # 15% base position
+        "leverage": 20,  # Aggressive scalping leverage
+        "entry": "3456.78",
+        "signal_strength": "strong",  # Will increase position size
+        "risk_level": "medium",
+        "market_condition": "trending",
+        "sl_percent": 0.8,  # Tight stop for scalping
+        "tp_percent": 1.2   # Quick profit target
+    }
+    
+    sample_weak_short = {
+        "action": "short",
+        "symbol": "BTCUSDT",
+        "quantity_percent": 0.12,  # 12% base position
+        "leverage": 15,
+        "entry": "67890.12",
+        "signal_strength": "weak",   # Will reduce position size
+        "risk_level": "high",       # Will further reduce and cap leverage
+        "market_condition": "volatile", # Will adjust stops/targets
+        "sl_percent": 0.8,
+        "tp_percent": 1.2
+    }
+    
+    sample_emergency_exit = {
+        "action": "emergency_exit",
+        "symbol": "ADAUSDT",
+        "signal_strength": "strong",
+        "risk_level": "high",
+        "market_condition": "volatile"
+    }
+    
+    sample_ranging_market = {
+        "action": "buy",
+        "symbol": "DOGEUSDT",
+        "quantity_percent": 0.10,
+        "leverage": 12,
+        "entry": "0.08234",
+        "signal_strength": "normal",
+        "risk_level": "low",
+        "market_condition": "ranging",  # Will adjust targets
+        "sl_percent": 0.8,
+        "tp_percent": 1.2
+    }
+    
+    return jsonify({
+        'success': True,
+        'message': 'Super Scalper webhook test endpoint ready',
+        'webhook_url': '/binance/super-scalper-webhook',
+        'alternative_url': '/tradingview/binance/super-scalper-webhook',
+        'scalping_defaults': {
+            'quantity_percent': 0.15,  # 15% for aggressive scalping
+            'leverage': 20,           # High leverage for scalping
+            'sl_percent': 0.8,        # Tight stop loss
+            'tp_percent': 1.2,        # Quick take profit
+            'margin_type': 'ISOLATED' # Better risk control
+        },
+        'sample_formats': {
+            'strong_long_signal': sample_strong_long,
+            'weak_short_signal': sample_weak_short,
+            'emergency_exit': sample_emergency_exit,
+            'ranging_market': sample_ranging_market
+        },
+        'signal_parameters': {
+            'signal_strength': ['weak', 'normal', 'strong'],
+            'risk_level': ['low', 'medium', 'high'],
+            'market_condition': ['trending', 'ranging', 'volatile', 'normal']
+        },
+        'auto_adjustments': {
+            'position_sizing': {
+                'strong_signals': '+50% size',
+                'weak_signals': '-30% size',
+                'high_risk': '-40% size',
+                'low_risk': '+20% size'
+            },
+            'risk_management': {
+                'volatile_markets': '+50% stop loss width',
+                'ranging_markets': '+30% take profit targets',
+                'high_risk_mode': 'Max 10x leverage'
+            }
+        },
+        'features': [
+            'Professional scalping position sizes (15% default)',
+            'High leverage support (20x default)',
+            'Automatic position sizing based on signal strength',
+            'Risk level adjustments (high risk = smaller positions)',
+            'Market condition adaptations (volatile = wider stops)',
+            'Emergency exit functionality',
+            'Automatic stop loss and take profit placement',
+            'ISOLATED margin for better risk control',
+            'Multi-factor signal analysis',
+            'Professional risk management'
+        ],
+        'usage_examples': {
+            'pine_script_long': {
+                'condition': 'enter_long and signal_strength == "strong"',
+                'alert_message': '{"action": "long", "symbol": "{{ticker}}", "entry": "{{close}}", "signal_strength": "strong", "market_condition": "trending"}'
+            },
+            'pine_script_short': {
+                'condition': 'enter_short and signal_strength == "normal"',
+                'alert_message': '{"action": "short", "symbol": "{{ticker}}", "entry": "{{close}}", "signal_strength": "normal", "risk_level": "medium"}'
+            },
+            'pine_script_exit': {
+                'condition': 'drawdown_exceeded or emergency_conditions',
+                'alert_message': '{"action": "emergency_exit", "symbol": "{{ticker}}"}'
+            }
+        },
+        'timestamp': datetime.now().isoformat()
+    })
+
+@binance_bp.route('/binance/test-smart-webhook', methods=['POST'])
+def test_smart_webhook():
+    """Test the smart webhook with sample data"""
+    # Sample data for the smart webhook
+    sample_buy_signal = {
+        "action": "buy",
+        "symbol": "BTCUSDT",
+        "quantity_percent": 0.20,  # 20% of account balance (default)
+        "leverage": 10,  # 10x leverage (default)
+        "entry": "67000.50",
+        "sl_percent": 1.5,  # 1.5% stop loss
+        "tp_percent": 3.0   # 3% take profit
+    }
+    
+    sample_sell_signal = {
+        "action": "sell",
+        "symbol": "ETHUSDT", 
+        "quantity_percent": 0.15,  # 15% of account balance
+        "leverage": 8,   # 8x leverage
+        "entry": "3500.25"
+    }
+    
+    sample_long_signal = {
+        "action": "long",  # Alias for buy
+        "symbol": "ADAUSDT",
+        # Using defaults: 20% quantity, 10x leverage
+        "entry": "0.45"
+    }
+    
+    sample_close_signal = {
+        "action": "close",
+        "symbol": "BTCUSDT"
+    }
+    
+    return jsonify({
+        'success': True,
+        'message': 'Smart webhook test endpoint ready',
+        'webhook_url': '/binance/smart-webhook',
+        'alternative_url': '/tradingview/binance/smart-webhook',
+        'defaults': {
+            'quantity_percent': 0.20,  # 20%
+            'leverage': 10,
+            'sl_percent': trading_config.get('default_sl_percentage', 1.0),
+            'tp_percent': trading_config.get('default_tp_percentage', 2.0)
+        },
+        'sample_formats': {
+            'buy_signal': sample_buy_signal,
+            'sell_signal': sample_sell_signal,
+            'long_signal': sample_long_signal,
+            'close_signal': sample_close_signal
+        },
+        'features': [
+            'Configurable quantity percentage (default 20%)',
+            'Configurable leverage (default 10x)',
+            'Auto-converts percentage to real quantity for any symbol',
+            'Supports buy/sell/long/short/close actions',
+            'Optional stop loss and take profit percentages',
+            'Validates minimum quantity requirements',
+            'Closes opposite positions before opening new ones',
+            'Comprehensive error handling with suggestions',
+            'Works with any USDT futures pair'
+        ],
+        'usage_examples': {
+            'minimal': {
+                'action': 'buy',
+                'symbol': 'BTCUSDT'
+                # Uses defaults: 20% quantity, 10x leverage
+            },
+            'custom': {
+                'action': 'sell',
+                'symbol': 'ETHUSDT',
+                'quantity_percent': 0.30,  # 30%
+                'leverage': 15,
+                'sl_percent': 2.0,
+                'tp_percent': 4.0
+            }
+        },
+        'pine_script_integration': {
+            'buy_alert': '{"action": "buy", "symbol": "' + '{{ticker}}' + '", "entry": "' + '{{close}}' + '"}',
+            'sell_alert': '{"action": "sell", "symbol": "' + '{{ticker}}' + '", "entry": "' + '{{close}}' + '"}',
+            'custom_alert': '{"action": "buy", "symbol": "' + '{{ticker}}' + '", "quantity_percent": 0.25, "leverage": 12, "entry": "' + '{{close}}' + '"}'
+        },
+        'timestamp': datetime.now().isoformat()
+    })
 
 @binance_bp.route('/binance/test-state-aware-ma-cross', methods=['POST'])
 def test_state_aware_ma_cross_webhook():

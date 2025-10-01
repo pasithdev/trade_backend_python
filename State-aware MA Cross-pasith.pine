@@ -80,10 +80,10 @@ if (short_signal or macd_close_signal or ema200_close_signal)
     buy_signal_active := false
     close_signal_sent := true
 
-// JSON Alert Messages for Binance Webhook
-buy_alert_message = '{"action": "buy", "symbol": "' + symbol + '", "balance_percentage": "' + str.tostring(quantity) + '", "leverage": "' + str.tostring(leverage) + '", "entry": "' + str.tostring(math.round(entry_price, 8)) + '"}'
+// JSON Alert Messages for Smart Webhook (uses defaults: 20% quantity, 10x leverage)
+buy_alert_message = '{"action": "buy", "symbol": "{{ticker}}", "entry": "{{close}}"}'
 
-close_alert_message = '{"action": "close", "symbol": "' + symbol + '", "leverage": "' + str.tostring(leverage) + '", "entry": "' + str.tostring(math.round(entry_price, 8)) + '"}'
+close_alert_message = '{"action": "close", "symbol": "{{ticker}}", "entry": "{{close}}"}'
 
 // === プロット ===
 plot(short_ma, color=color.green, title="Short MA")
