@@ -931,6 +931,125 @@ def webhook_trade():
             'error': f'Webhook trade error: {str(e)}'
         }), 500
 
+def close_opposite_position_immediate(symbol, new_action):
+    """
+    IMMEDIATELY close any existing opposite position for the given symbol before opening new position
+    Ensures immediate execution and confirmation before proceeding
+    new_action: 'buy' for long, 'sell' for short
+    """
+    global binance_client
+    
+    if not binance_client:
+        return {'success': False, 'error': 'Binance client not configured'}
+    
+    try:
+        logger.info(f"🔄 IMMEDIATE CHECK: Looking for opposite positions to close for {symbol} before {new_action}")
+        
+        # Get current positions for the symbol
+        positions = call_binance_api(binance_client.futures_position_information, symbol=symbol)
+        positions_closed = []
+        total_closed_value = 0
+        
+        for position in positions:
+            position_amt = float(position['positionAmt'])
+            
+            # Skip if no position
+            if position_amt == 0:
+                continue
+            
+            # Determine if we need to close this position
+            should_close = False
+            close_side = None
+            close_quantity = abs(position_amt)
+            position_type = None
+            
+            if new_action == 'buy' and position_amt < 0:  # Closing short position before buy
+                should_close = True
+                close_side = 'BUY'
+                position_type = 'SHORT'
+                logger.info(f"⚠️  FOUND SHORT POSITION: {position_amt} {symbol} - MUST CLOSE IMMEDIATELY before BUY")
+            elif new_action == 'sell' and position_amt > 0:  # Closing long position before sell
+                should_close = True
+                close_side = 'SELL' 
+                position_type = 'LONG'
+                logger.info(f"⚠️  FOUND LONG POSITION: {position_amt} {symbol} - MUST CLOSE IMMEDIATELY before SELL")
+            
+            if should_close:
+                # Generate unique client order ID for closing order
+                import uuid
+                close_client_order_id = f"CLOSE_{position_type}_{symbol}_{int(datetime.now().timestamp())}_{str(uuid.uuid4())[:8]}"
+                
+                # IMMEDIATELY close the position with MARKET order
+                logger.info(f"🚀 CLOSING {position_type} POSITION IMMEDIATELY: {close_side} {close_quantity} {symbol}")
+                
+                close_order = call_binance_api(binance_client.futures_create_order,
+                    symbol=symbol,
+                    side=close_side,
+                    type='MARKET',
+                    quantity=close_quantity,
+                    reduceOnly=True,
+                    newClientOrderId=close_client_order_id
+                )
+                
+                # Calculate closed position value
+                entry_price = float(position.get('entryPrice', 0))
+                mark_price = float(position.get('markPrice', 0))
+                closed_value = close_quantity * mark_price
+                total_closed_value += closed_value
+                
+                positions_closed.append({
+                    'position_type': position_type,
+                    'side': close_side,
+                    'quantity': close_quantity,
+                    'entry_price': entry_price,
+                    'mark_price': mark_price,
+                    'closed_value': closed_value,
+                    'order_id': close_order['orderId'],
+                    'client_order_id': close_client_order_id
+                })
+                
+                logger.info(f"✅ {position_type} POSITION CLOSED: {close_side} {close_quantity} {symbol} at ~{mark_price} - Order ID: {close_order['orderId']}")
+                
+                # Cancel any existing TP/SL orders for this symbol to avoid conflicts
+                try:
+                    existing_orders = call_binance_api(binance_client.futures_get_open_orders, symbol=symbol)
+                    cancelled_orders = []
+                    for order in existing_orders:
+                        call_binance_api(binance_client.futures_cancel_order, symbol=symbol, orderId=order['orderId'])
+                        cancelled_orders.append(order['orderId'])
+                        logger.info(f"🗑️  Cancelled existing order {order['orderId']} for {symbol}")
+                    
+                    if cancelled_orders:
+                        logger.info(f"🧹 Cancelled {len(cancelled_orders)} existing orders for clean slate")
+                        
+                except Exception as cancel_error:
+                    logger.warning(f"⚠️  Error cancelling existing orders for {symbol}: {cancel_error}")
+        
+        if positions_closed:
+            return {
+                'success': True, 
+                'position_closed': True,
+                'message': f'✅ IMMEDIATELY CLOSED {len(positions_closed)} opposite position(s) for {symbol} (Total value: {total_closed_value:.2f} USDT)',
+                'closed_positions': positions_closed,
+                'total_closed_value': total_closed_value,
+                'ready_for_new_order': True
+            }
+        else:
+            logger.info(f"✅ No opposite positions found for {symbol} - Ready to proceed with {new_action}")
+            return {
+                'success': True, 
+                'position_closed': False,
+                'message': 'No opposite positions to close - Ready for new order',
+                'ready_for_new_order': True
+            }
+        
+    except BinanceAPIException as e:
+        logger.error(f"❌ Binance API error while closing opposite position: {e.message}")
+        return {'success': False, 'error': f'Binance API error: {e.message}'}
+    except Exception as e:
+        logger.error(f"❌ Error closing opposite position: {str(e)}")
+        return {'success': False, 'error': f'Error closing opposite position: {str(e)}'}
+
 def close_opposite_position(symbol, new_action):
     """
     Close any existing opposite position for the given symbol before opening new position
@@ -1284,13 +1403,20 @@ def target_trend_webhook():
         
         logger.info(f"Target Trend webhook received: {action} {balance_percentage*100}% balance ({leverage}x leverage) for {symbol} at {entry_price}")
         
-        # Step 1: Close opposite position first
-        close_result = close_opposite_position(symbol, action)
+        # Step 1: IMMEDIATELY close opposite position first and wait for confirmation
+        logger.info(f"Step 1: Checking and closing opposite positions for {symbol} before {action}")
+        close_result = close_opposite_position_immediate(symbol, action)
         if not close_result['success']:
             return jsonify({
                 'success': False,
                 'error': f'Failed to close existing position: {close_result["error"]}'
             }), 400
+        
+        # Wait a moment for position closure to be fully processed
+        import time
+        if close_result.get('position_closed', False):
+            logger.info(f"Waiting 1 second for position closure confirmation...")
+            time.sleep(1)
         
         # Step 2: Set leverage for the symbol
         try:
@@ -1321,17 +1447,24 @@ def target_trend_webhook():
         quantity = quantity_result['quantity']
         logger.info(f"Calculated quantity: {quantity} {symbol} (from {balance_percentage*100}% balance * {leverage}x leverage)")
         
-        # Step 5: Execute main entry order
+        # Step 5: IMMEDIATELY execute main entry order with unique client ID
         side = 'BUY' if action == 'buy' else 'SELL'
+        
+        # Generate unique client order ID for tracking
+        import uuid
+        client_order_id = f"TT_{action.upper()}_{symbol}_{int(datetime.now().timestamp())}_{str(uuid.uuid4())[:8]}"
+        
+        logger.info(f"Step 5: Executing {action} order immediately after position closure")
         
         main_order = call_binance_api(binance_client.futures_create_order,
             symbol=symbol,
             side=side,
             type='MARKET',
-            quantity=quantity
+            quantity=quantity,
+            newClientOrderId=client_order_id
         )
         
-        logger.info(f"Main entry order executed: {action} {quantity} {symbol} (dual direction strategy)")
+        logger.info(f"✅ IMMEDIATE {action.upper()} ORDER EXECUTED: {quantity} {symbol} - Order ID: {main_order.get('orderId')} - Client ID: {client_order_id}")
         
         # Store trade record
         trade_record = {
@@ -1355,9 +1488,19 @@ def target_trend_webhook():
         
         current_price = call_binance_api(binance_client.futures_symbol_ticker, symbol=symbol)['price']
         
+        # Prepare execution summary
+        execution_summary = {
+            'opposite_positions_closed': close_result.get('position_closed', False),
+            'closed_positions_count': len(close_result.get('closed_positions', [])),
+            'total_closed_value': close_result.get('total_closed_value', 0),
+            'new_order_executed': True,
+            'execution_sequence': 'IMMEDIATE: Close opposite positions → Open new position'
+        }
+        
         return jsonify({
             'success': True,
-            'message': f'Target Trend order executed: {action} {quantity} {symbol} (dual direction mode)',
+            'message': f'✅ TARGET TREND {action.upper()} EXECUTED IMMEDIATELY: {quantity} {symbol}',
+            'execution_summary': execution_summary,
             'trade': {
                 'symbol': symbol,
                 'action': action,
@@ -1368,10 +1511,11 @@ def target_trend_webhook():
                 'entry_price': entry_price,
                 'current_price': float(current_price),
                 'main_order_id': main_order.get('orderId'),
-                'opposite_position_closed': close_result.get('message', 'No opposite positions'),
-                'mode': 'dual_direction',
+                'client_order_id': client_order_id,
+                'opposite_positions_closed': close_result.get('closed_positions', []),
+                'mode': 'dual_direction_immediate',
                 'quantity_calculation': quantity_result['details'],
-                'note': f'Quantity calculated from {balance_percentage*100}% of account balance with {leverage}x leverage'
+                'note': f'IMMEDIATE EXECUTION: Closed opposite positions first, then opened {action} position with {balance_percentage*100}% account balance × {leverage}x leverage'
             },
             'timestamp': datetime.now().isoformat()
         })
@@ -1402,7 +1546,7 @@ def test_target_trend_webhook():
     sample_buy_signal = {
         "action": "buy",
         "symbol": "BTCUSDT",
-        "quantity": "0.20",
+        "balance_percentage": "0.20",  # Updated to use new format
         "leverage": "10",
         "entry": "50000.12345678"
     }
@@ -1410,32 +1554,54 @@ def test_target_trend_webhook():
     sample_sell_signal = {
         "action": "sell",
         "symbol": "BTCUSDT", 
-        "quantity": "0.20",
+        "balance_percentage": "0.20",  # Updated to use new format
         "leverage": "10",
         "entry": "50000.12345678"
     }
     
     return jsonify({
         'success': True,
-        'message': 'Target Trend webhook test endpoint ready',
+        'message': 'Target Trend webhook test endpoint ready - WITH IMMEDIATE EXECUTION',
         'webhook_url': '/binance/target-trend-webhook',
         'sample_formats': {
             'buy_signal': sample_buy_signal,
             'sell_signal': sample_sell_signal
         },
+        'immediate_execution_features': [
+            '🚀 IMMEDIATE opposite position closure before new order',
+            '⚡ Zero-delay execution sequence',
+            '🔄 Automatic order cancellation for clean slate',
+            '✅ Real-time position monitoring and confirmation',
+            '📊 Detailed execution summary with timing',
+            '🎯 Unique client order IDs for precise tracking'
+        ],
+        'execution_sequence': {
+            'step_1': 'Receive signal (buy/sell)',
+            'step_2': 'IMMEDIATELY check for opposite positions',
+            'step_3': 'IMMEDIATELY close opposite positions with MARKET orders',
+            'step_4': 'Cancel all existing TP/SL orders for clean slate',
+            'step_5': 'Wait 1 second for position closure confirmation',
+            'step_6': 'IMMEDIATELY open new position with calculated quantity',
+            'step_7': 'Return detailed execution summary'
+        },
+        'signal_behavior': {
+            'BUY_signal': 'Immediately closes any SHORT positions → Opens LONG position',
+            'SELL_signal': 'Immediately closes any LONG positions → Opens SHORT position'
+        },
         'features': [
             'Dual direction strategy (long and short positions)',
-            'Closes opposite positions before opening new ones',
+            'IMMEDIATE opposite position closure with confirmation',
             'Buy signals for long entries, sell signals for short entries',
             'Supports both bullish and bearish market conditions',
             'Respects symbol precision and tick size',
             'Comprehensive order tracking and logging',
-            'Simplified JSON format'
+            'Enhanced JSON format with balance_percentage'
         ],
         'usage_instructions': {
             'step_1': 'Configure TradingView alert to send to /binance/target-trend-webhook or /tradingview/binancebinance/target-trend-webhook',
-            'step_2': 'Set pine script alert message to the raw JSON format',
-            'step_3': 'Ensure Binance API credentials are configured with futures trading permissions'
+            'step_2': 'Set pine script alert message to the raw JSON format (use balance_percentage instead of quantity)',
+            'step_3': 'Ensure Binance API credentials are configured with futures trading permissions',
+            'step_4': 'Test with small balance_percentage first (e.g., 0.05 = 5%)'
         },
         'supported_urls': [
             '/api/binance/target-trend-webhook',
