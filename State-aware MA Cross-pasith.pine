@@ -4,12 +4,80 @@
 //@version=5
 strategy("State-aware MA Cross Strategy", overlay=true, default_qty_type=strategy.percent_of_equity, default_qty_value=100)
 
-// Binance Webhook Settings
-quantity = input.float(0.20, "Order Quantity (% of equity)", minval=0.01, maxval=1.0, step=0.01, group="Binance Settings")
+// Binance Webhook Settings - Dynamic Position Sizing
+base_balance_percentage = input.float(0.20, "Base Balance Percentage", minval=0.01, maxval=1.0, step=0.01, group="Binance Settings", tooltip="Base percentage to use, will be auto-adjusted for minimum requirements")
 leverage = input.int(10, "Leverage", minval=1, maxval=125, group="Binance Settings")
+min_position_value = input.float(10.0, "Minimum Position Value (USDT)", minval=5.0, maxval=100.0, group="Binance Settings", tooltip="Minimum position value in USDT to ensure orders pass exchange requirements")
 
 // Use current chart symbol dynamically
 symbol = syminfo.ticker
+
+// Dynamic position sizing based on symbol requirements
+// Calculate adaptive balance percentage based on price and minimum requirements
+current_price = close
+estimated_account_balance = 1000.0  // Default estimation, will be overridden by actual balance
+
+// Symbol-specific minimum quantity and recommended balance mappings (common pairs)
+get_symbol_config() =>
+    switch syminfo.ticker
+        // Major pairs (higher minimum values, need more balance)
+        "BTCUSDT" => [0.001, 0.40]   // [min_qty, recommended_balance_pct]
+        "ETHUSDT" => [0.01, 0.25]
+        "BNBUSDT" => [0.01, 0.20]
+        "LTCUSDT" => [0.001, 0.35]
+        
+        // Mid-cap pairs (moderate requirements)
+        "ADAUSDT" => [1.0, 0.15]
+        "SOLUSDT" => [0.1, 0.20]
+        "DOTUSDT" => [0.1, 0.15]
+        "LINKUSDT" => [0.01, 0.15]
+        "AVAXUSDT" => [0.01, 0.20]
+        "UNIUSDT" => [0.1, 0.15]
+        "ATOMUSDT" => [0.1, 0.15]
+        "FILUSDT" => [0.1, 0.15]
+        "MATICUSDT" => [1.0, 0.10]
+        "ALGOUSDT" => [1.0, 0.10]
+        
+        // Lower-cap pairs (smaller minimum values, lower balance needed)
+        "DOGEUSDT" => [10.0, 0.08]
+        "XRPUSDT" => [1.0, 0.10]
+        "VETUSDT" => [10.0, 0.08]
+        "1INCHUSDT" => [1.0, 0.12]
+        "TRXUSDT" => [10.0, 0.08]
+        "SHIBUSDT" => [1000.0, 0.05]
+        
+        // Stablecoins and special cases
+        "USDT" => [1.0, 0.05]
+        "BUSD" => [1.0, 0.05]
+        
+        => [0.01, 0.15]  // Default for unknown symbols
+
+get_min_quantity_estimate() =>
+    [min_qty, recommended_balance_pct] = get_symbol_config()
+    min_qty
+
+get_recommended_balance_pct() =>
+    [min_qty, recommended_balance_pct] = get_symbol_config()
+    recommended_balance_pct
+
+// Calculate minimum position value needed
+min_quantity = get_min_quantity_estimate()
+recommended_balance_pct = get_recommended_balance_pct()
+min_position_value_needed = min_quantity * current_price
+
+// Smart adaptive balance percentage calculation
+// Use the higher of: user setting, symbol recommendation, or calculated minimum
+required_balance_for_min_position = min_position_value_needed * 1.3 / estimated_account_balance  // 30% buffer
+
+// Choose the most appropriate balance percentage
+smart_balance_pct = math.max(base_balance_percentage, recommended_balance_pct)
+smart_balance_pct := math.max(smart_balance_pct, required_balance_for_min_position)
+
+// Cap at reasonable maximum for safety
+final_balance_percentage = math.min(smart_balance_pct, 0.85)  // Max 85%
+
+// Use the final calculated percentage
+quantity = final_balance_percentage
 
 // === ユーザー設定（ここは固定された最適値） ===
 s00_short = ta.ema(close, 15)
@@ -80,15 +148,49 @@ if (short_signal or macd_close_signal or ema200_close_signal)
     buy_signal_active := false
     close_signal_sent := true
 
-// JSON Alert Messages for Smart Webhook (uses defaults: 20% quantity, 10x leverage)
-buy_alert_message = '{"action": "buy", "symbol": "{{ticker}}", "entry": "{{close}}"}'
+// Calculate optimal balance percentage for webhook
+// This ensures we always meet minimum requirements across different symbols
+webhook_balance_percentage = math.max(quantity, 0.10)  // Minimum 10% to handle most symbols
+webhook_balance_percentage := math.min(webhook_balance_percentage, 0.80)  // Maximum 80% for safety
 
-close_alert_message = '{"action": "close", "symbol": "{{ticker}}", "entry": "{{close}}"}'
+// JSON Alert Messages for Smart Webhook with adaptive sizing
+buy_alert_message = '{"symbol": "' + syminfo.ticker + '", "action": "buy", "balance_percentage": ' + str.tostring(webhook_balance_percentage) + ', "leverage": ' + str.tostring(leverage) + ', "entry": ' + str.tostring(close) + ', "min_qty_estimate": ' + str.tostring(min_quantity) + ', "min_position_value": ' + str.tostring(min_position_value_needed) + '}'
+
+close_alert_message = '{"symbol": "' + syminfo.ticker + '", "action": "close", "balance_percentage": ' + str.tostring(webhook_balance_percentage) + ', "leverage": ' + str.tostring(leverage) + ', "entry": ' + str.tostring(close) + '}'
 
 // === プロット ===
 plot(short_ma, color=color.green, title="Short MA")
 plot(long_ma, color=color.red, title="Long MA")
 plot(ema200, color=color.blue, title="EMA200", linewidth=2)
+
+// Debug table for position sizing
+show_debug = input.bool(true, "Show Debug Info", group="Debug")
+if show_debug and barstate.islast
+    var table debug_table = table.new(position.top_left, 2, 8, bgcolor=color.white, border_width=1)
+    
+    table.cell(debug_table, 0, 0, "Position Sizing Debug", text_color=color.white, bgcolor=color.blue, text_size=size.small)
+    table.cell(debug_table, 1, 0, syminfo.ticker, text_color=color.white, bgcolor=color.blue, text_size=size.small)
+    
+    table.cell(debug_table, 0, 1, "Current Price", text_color=color.black, text_size=size.tiny)
+    table.cell(debug_table, 1, 1, str.tostring(current_price, "#.####"), text_color=color.black, text_size=size.tiny)
+    
+    table.cell(debug_table, 0, 2, "Min Quantity Est.", text_color=color.black, text_size=size.tiny)
+    table.cell(debug_table, 1, 2, str.tostring(min_quantity, "#.####"), text_color=color.black, text_size=size.tiny)
+    
+    table.cell(debug_table, 0, 3, "Min Position Value", text_color=color.black, text_size=size.tiny)
+    table.cell(debug_table, 1, 3, "$" + str.tostring(min_position_value_needed, "#.##"), text_color=color.black, text_size=size.tiny)
+    
+    table.cell(debug_table, 0, 4, "Base Balance %", text_color=color.black, text_size=size.tiny)
+    table.cell(debug_table, 1, 4, str.tostring(base_balance_percentage * 100, "#.#") + "%", text_color=color.black, text_size=size.tiny)
+    
+    table.cell(debug_table, 0, 5, "Recommended %", text_color=color.black, text_size=size.tiny)
+    table.cell(debug_table, 1, 5, str.tostring(recommended_balance_pct * 100, "#.#") + "%", text_color=color.blue, text_size=size.tiny)
+    
+    table.cell(debug_table, 0, 6, "Smart Balance %", text_color=color.black, text_size=size.tiny)
+    table.cell(debug_table, 1, 6, str.tostring(smart_balance_pct * 100, "#.#") + "%", text_color=color.orange, text_size=size.tiny)
+    
+    table.cell(debug_table, 0, 7, "Webhook Balance %", text_color=color.black, text_size=size.tiny)
+    table.cell(debug_table, 1, 7, str.tostring(webhook_balance_percentage * 100, "#.#") + "%", text_color=color.green, text_size=size.tiny)
 
 // Alert Conditions for Binance Webhook
 alertcondition(long_signal, title="Buy Signal", message="{{strategy.order.action}}")
