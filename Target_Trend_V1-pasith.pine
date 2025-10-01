@@ -164,10 +164,6 @@ plotshape(sigUp,   "", shape.triangleup, location.absolute, color.new(up_color, 
 plotshape(sigDn, "", shape.triangledown, location.absolute, dn_color, size = size.tiny)
 plotshape(sigDn, "", shape.triangledown, location.absolute, color.new(dn_color, 80), size = size.small)
 
-// Alert Conditions for Binance Webhook with confirmed signals
-alertcondition(signal_up, title="Long Signal", message='{{"action": "buy", "symbol": "' + symbol + '", "quantity": "' + str.tostring(quantity) + '", "leverage": "' + str.tostring(leverage) + '", "entry": "' + str.tostring(math.round(close, 8)) + '"}}')
-alertcondition(signal_down, title="Short Signal", message='{{"action": "sell", "symbol": "' + symbol + '", "quantity": "' + str.tostring(quantity) + '", "leverage": "' + str.tostring(leverage) + '", "entry": "' + str.tostring(math.round(close, 8)) + '"}}')
-
 // Custom Alert Messages - Only fire when bar is confirmed
 if signal_up
     alert(buy_alert_message, alert.freq_once_per_bar)
