@@ -13,10 +13,18 @@ binance_bp = Blueprint('binance', __name__)
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+# 🔒 PERMANENT BINANCE API CREDENTIALS
+# These credentials are stored permanently to prevent API configuration loss
+PERMANENT_API_CREDENTIALS = {
+    'api_key': 'M1lUVsQ5VJ8FuuYNdailwDSXsTi1zfVRtbIWb5INCBxoK2ag0voWi9bDZClnTZsJ',
+    'api_secret': 'bSMHbf1evgubRauqMIRxfZ5iNSuNXGmOXDrBCuv90PkeeDGuN9iYI0mIor8DUBoF',
+    'testnet': False  # Production mode
+}
+
 # Global variables for Binance client and configuration
 binance_client = None
 trading_config = {
-    'testnet': True,  # Use testnet by default for safety
+    'testnet': False,  # Production mode with permanent credentials
     'default_tp_percentage': 2.0,  # 2% take profit
     'default_sl_percentage': 1.0,  # 1% stop loss
     'default_quantity_percentage': 0.20,  # 20% of balance (new default)
@@ -30,6 +38,49 @@ trading_config = {
 
 # Store active orders for tracking
 active_orders = []
+
+def auto_init_binance_client():
+    """
+    Automatically initialize Binance client using permanent credentials
+    This prevents API configuration loss issues
+    """
+    global binance_client
+    
+    if binance_client is not None:
+        logger.info("Binance client already initialized")
+        return True
+    
+    try:
+        logger.info("Auto-initializing Binance client with permanent credentials...")
+        success = init_binance_client(
+            PERMANENT_API_CREDENTIALS['api_key'],
+            PERMANENT_API_CREDENTIALS['api_secret'],
+            PERMANENT_API_CREDENTIALS['testnet']
+        )
+        
+        if success:
+            logger.info("✅ Binance client auto-initialized successfully with permanent credentials")
+            return True
+        else:
+            logger.error("❌ Failed to auto-initialize Binance client")
+            return False
+            
+    except Exception as e:
+        logger.error(f"❌ Auto-initialization error: {e}")
+        return False
+
+def ensure_binance_client():
+    """
+    Ensure Binance client is initialized, auto-initialize if needed
+    Call this before any Binance API operations
+    """
+    global binance_client
+    
+    if binance_client is None:
+        logger.info("Binance client not initialized, auto-initializing...")
+        return auto_init_binance_client()
+    
+    return True
 
 def log_binance_api_call(method_name, params=None, response=None, error=None):
     """
@@ -1130,7 +1181,7 @@ def close_opposite_position(symbol, new_action):
 
 def get_symbol_minimum_requirements(symbol):
     """
-    Get minimum requirements for a symbol
+    Get minimum requirements for a symbol with enhanced error handling
     
     Args:
         symbol: Trading symbol (e.g., 'BTCUSDT')
@@ -1141,13 +1192,68 @@ def get_symbol_minimum_requirements(symbol):
     global binance_client
     
     try:
+        # Get exchange information with error handling
+        logger.info(f"Fetching symbol requirements for {symbol}")
         exchange_info = call_binance_api(binance_client.futures_exchange_info)
-        symbol_info = next(s for s in exchange_info['symbols'] if s['symbol'] == symbol)
         
-        # Extract filters
-        lot_size_filter = next(f for f in symbol_info['filters'] if f['filterType'] == 'LOT_SIZE')
-        price_filter = next(f for f in symbol_info['filters'] if f['filterType'] == 'PRICE_FILTER')
-        min_notional_filter = next((f for f in symbol_info['filters'] if f['filterType'] == 'MIN_NOTIONAL'), None)
+        # Find symbol info
+        symbol_info = None
+        for s in exchange_info['symbols']:
+            if s['symbol'] == symbol:
+                symbol_info = s
+                break
+        
+        if not symbol_info:
+            raise ValueError(f"Symbol {symbol} not found in exchange info")
+        
+        logger.info(f"Found symbol info for {symbol}, extracting filters...")
+        
+        # Extract filters with better error handling
+        lot_size_filter = None
+        price_filter = None
+        min_notional_filter = None
+        market_lot_size_filter = None
+        
+        for f in symbol_info['filters']:
+            if f['filterType'] == 'LOT_SIZE':
+                lot_size_filter = f
+            elif f['filterType'] == 'PRICE_FILTER':
+                price_filter = f
+            elif f['filterType'] == 'MIN_NOTIONAL':
+                min_notional_filter = f
+            elif f['filterType'] == 'MARKET_LOT_SIZE':
+                market_lot_size_filter = f
+        
+        # Validate required filters
+        if not lot_size_filter:
+            raise ValueError(f"LOT_SIZE filter not found for {symbol}")
+        if not price_filter:
+            raise ValueError(f"PRICE_FILTER not found for {symbol}")
+        
+        # Handle minimum notional - try different approaches
+        min_notional = 0
+        if min_notional_filter:
+            try:
+                # First try 'minNotional' field
+                if 'minNotional' in min_notional_filter:
+                    min_notional = float(min_notional_filter['minNotional'])
+                # Then try 'notional' field
+                elif 'notional' in min_notional_filter:
+                    min_notional = float(min_notional_filter['notional'])
+                # Handle other possible field names
+                elif 'minNotionalValue' in min_notional_filter:
+                    min_notional = float(min_notional_filter['minNotionalValue'])
+                else:
+                    logger.warning(f"MIN_NOTIONAL filter found but no recognizable field for {symbol}: {min_notional_filter}")
+                    min_notional = 5.0  # Default minimum for futures
+            except (KeyError, ValueError, TypeError) as e:
+                logger.warning(f"Error parsing MIN_NOTIONAL for {symbol}: {e}, using default")
+                min_notional = 5.0
+        else:
+            logger.info(f"No MIN_NOTIONAL filter found for {symbol}, using default minimum")
+            min_notional = 5.0  # Default minimum for futures trading
+        
+        logger.info(f"Successfully extracted requirements for {symbol}: min_qty={lot_size_filter['minQty']}, min_notional={min_notional}")
         
         return {
             'success': True,
@@ -1157,15 +1263,61 @@ def get_symbol_minimum_requirements(symbol):
             'min_price': float(price_filter['minPrice']),
             'max_price': float(price_filter['maxPrice']),
             'tick_size': float(price_filter['tickSize']),
-            'min_notional': float(min_notional_filter['minNotional']) if min_notional_filter else 0,
-            'symbol_info': symbol_info
+            'min_notional': min_notional,
+            'symbol_info': symbol_info,
+            'filters': symbol_info['filters']  # Include all filters for debugging
         }
     except Exception as e:
-        logger.error(f"Failed to get symbol requirements for {symbol}: {e}")
+        error_msg = f"Failed to get symbol requirements for {symbol}: {e}"
+        logger.error(error_msg)
+        logger.error(f"Exception type: {type(e).__name__}")
+        
+        # Try to provide fallback values for common symbols
+        fallback_requirements = get_fallback_symbol_requirements(symbol)
+        if fallback_requirements:
+            logger.warning(f"Using fallback requirements for {symbol}")
+            return fallback_requirements
+        
         return {
             'success': False,
-            'error': str(e)
+            'error': error_msg
         }
+
+def get_fallback_symbol_requirements(symbol):
+    """
+    Provide fallback symbol requirements for common trading pairs
+    when API calls fail
+    """
+    fallback_data = {
+        'BTCUSDT': {'min_qty': 0.001, 'min_notional': 5.0, 'step_size': 0.001, 'tick_size': 0.01},
+        'ETHUSDT': {'min_qty': 0.001, 'min_notional': 5.0, 'step_size': 0.001, 'tick_size': 0.01},
+        'BNBUSDT': {'min_qty': 0.001, 'min_notional': 5.0, 'step_size': 0.001, 'tick_size': 0.01},
+        'ADAUSDT': {'min_qty': 1.0, 'min_notional': 5.0, 'step_size': 1.0, 'tick_size': 0.0001},
+        'DOGEUSDT': {'min_qty': 1.0, 'min_notional': 5.0, 'step_size': 1.0, 'tick_size': 0.000001},
+        'XRPUSDT': {'min_qty': 0.1, 'min_notional': 5.0, 'step_size': 0.1, 'tick_size': 0.0001},
+        'SOLUSDT': {'min_qty': 0.001, 'min_notional': 5.0, 'step_size': 0.001, 'tick_size': 0.001},
+        'DOTUSDT': {'min_qty': 0.01, 'min_notional': 5.0, 'step_size': 0.01, 'tick_size': 0.001},
+        'LINKUSDT': {'min_qty': 0.01, 'min_notional': 5.0, 'step_size': 0.01, 'tick_size': 0.001},
+        'LTCUSDT': {'min_qty': 0.001, 'min_notional': 5.0, 'step_size': 0.001, 'tick_size': 0.01}
+    }
+    
+    if symbol in fallback_data:
+        data = fallback_data[symbol]
+        logger.info(f"Using fallback requirements for {symbol}: {data}")
+        return {
+            'success': True,
+            'min_qty': data['min_qty'],
+            'max_qty': 9000000000.0,  # Large default
+            'step_size': data['step_size'],
+            'min_price': 0.000001,  # Small default
+            'max_price': 1000000.0,  # Large default
+            'tick_size': data['tick_size'],
+            'min_notional': data['min_notional'],
+            'fallback': True,
+            'symbol_info': None
+        }
+    
+    return None
 
 def calculate_position_quantity(symbol, balance_percentage=0.20, leverage=10):
     """
@@ -1410,10 +1562,10 @@ def target_trend_webhook():
     """
     global binance_client, active_orders
     
-    if not binance_client:
+    if not ensure_binance_client():
         return jsonify({
             'success': False,
-            'error': 'Binance client not configured. Please configure API credentials first.'
+            'error': 'Binance client initialization failed. Auto-initialization attempted.'
         }), 400
     
     try:
@@ -1671,10 +1823,10 @@ def state_aware_ma_cross_webhook():
     """
     global binance_client, active_orders
     
-    if not binance_client:
+    if not ensure_binance_client():
         return jsonify({
             'success': False,
-            'error': 'Binance client not configured. Please configure API credentials first.'
+            'error': 'Binance client initialization failed. Auto-initialization attempted.'
         }), 400
     
     try:
@@ -2137,10 +2289,10 @@ def super_scalper_webhook():
     """
     global binance_client, active_orders
     
-    if not binance_client:
+    if not ensure_binance_client():
         return jsonify({
             'success': False,
-            'error': 'Binance client not configured. Please configure API credentials first.'
+            'error': 'Binance client initialization failed. Auto-initialization attempted.'
         }), 400
     
     try:
