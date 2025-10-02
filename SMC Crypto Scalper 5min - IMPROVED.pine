@@ -1,0 +1,261 @@
+//@version=5
+strategy("SMC Crypto Scalper 5min - IMPROVED", overlay=true, margin_long=100, margin_short=100, pyramiding=0, initial_capital=10000, default_qty_type=strategy.percent_of_equity, default_qty_value=1, commission_type=strategy.commission.percent, commission_value=0.1)
+
+// ========== IMPROVED INPUT PARAMETERS ==========
+lookback = input.int(15, "Swing Lookback Period", minval=5, maxval=50)
+risk_percent = input.float(1.0, "Risk % per Trade", minval=0.1, maxval=5.0)
+rr_ratio = input.float(3.0, "Risk/Reward Ratio", minval=1.5, maxval=5.0)
+use_volume_filter = input.bool(true, "Use Volume Filter")
+trailing_enabled = input.bool(true, "Enable Trailing Stop")
+use_trend_filter = input.bool(true, "Use Trend Filter (EMA)")
+ema_period = input.int(50, "EMA Trend Period", minval=20, maxval=200)
+use_rsi_filter = input.bool(true, "Use RSI Filter")
+rsi_overbought = input.int(70, "RSI Overbought", minval=60, maxval=90)
+rsi_oversold = input.int(30, "RSI Oversold", minval=10, maxval=40)
+min_risk_reward = input.float(2.0, "Minimum Risk/Reward Required", minval=1.0, maxval=5.0)
+max_risk_percent = input.float(3.0, "Maximum Risk % Allowed", minval=1.0, maxval=10.0)
+use_time_filter = input.bool(true, "Avoid Low Volatility Hours")
+
+// ========== TREND FILTER ==========
+ema_trend = ta.ema(close, ema_period)
+bullish_trend = close > ema_trend
+bearish_trend = close < ema_trend
+
+// ========== RSI FILTER ==========
+rsi = ta.rsi(close, 14)
+rsi_bullish = rsi < rsi_overbought and rsi > 40
+rsi_bearish = rsi > rsi_oversold and rsi < 60
+
+// ========== VOLATILITY/TIME FILTER ==========
+atr = ta.atr(14)
+atr_sma = ta.sma(atr, 20)
+high_volatility = atr > atr_sma * 0.8
+
+// Avoid low volatility hours (typically 0-4 UTC for crypto)
+hour_ok = not use_time_filter or (hour >= 6 and hour <= 23)
+
+// ========== SWING HIGH/LOW DETECTION ==========
+swing_high = ta.highest(high, lookback * 2 + 1) == high[lookback]
+swing_low = ta.lowest(low, lookback * 2 + 1) == low[lookback]
+
+// Store swing levels in arrays
+var float[] swing_highs = array.new<float>()
+var float[] swing_lows = array.new<float>()
+var int[] swing_high_bars = array.new<int>()
+var int[] swing_low_bars = array.new<int>()
+
+if swing_high
+    array.unshift(swing_highs, high[lookback])
+    array.unshift(swing_high_bars, bar_index[lookback])
+    if array.size(swing_highs) > 10
+        array.pop(swing_highs)
+        array.pop(swing_high_bars)
+
+if swing_low
+    array.unshift(swing_lows, low[lookback])
+    array.unshift(swing_low_bars, bar_index[lookback])
+    if array.size(swing_lows) > 10
+        array.pop(swing_lows)
+        array.pop(swing_low_bars)
+
+// ========== SAFE ARRAY ACCESS ==========
+safe_get_swing_high(index) =>
+    array.size(swing_highs) > index ? array.get(swing_highs, index) : na
+
+safe_get_swing_low(index) =>
+    array.size(swing_lows) > index ? array.get(swing_lows, index) : na
+
+recent_swing_high = safe_get_swing_high(0)
+recent_swing_low = safe_get_swing_low(0)
+
+// ========== BOS/CHOCH DETECTION ==========
+bullish_bos = false
+bearish_bos = false
+
+prev_swing_high = safe_get_swing_high(1)
+prev_swing_low = safe_get_swing_low(1)
+
+if not na(prev_swing_high) and close > prev_swing_high
+    bullish_bos := true
+
+if not na(prev_swing_low) and close < prev_swing_low
+    bearish_bos := true
+
+// ========== RETEST ZONES ==========
+bullish_retest_zone = prev_swing_high
+bearish_retest_zone = prev_swing_low
+
+// ========== IMPROVED RETEST CONFIRMATION ==========
+// More strict retest: price must pull back into zone and close above/below
+bullish_retest = bullish_bos and not na(bullish_retest_zone) and 
+                 low <= bullish_retest_zone * 1.002 and  // Allow 0.2% tolerance
+                 close > bullish_retest_zone and
+                 close > open  // Bullish candle
+
+bearish_retest = bearish_bos and not na(bearish_retest_zone) and 
+                 high >= bearish_retest_zone * 0.998 and  // Allow 0.2% tolerance
+                 close < bearish_retest_zone and
+                 close < open  // Bearish candle
+
+// ========== VOLUME FILTER ==========
+volume_avg = ta.sma(volume, 20)
+volume_confirm = volume > volume_avg * 1.2  // Require 20% above average
+
+// ========== MOMENTUM CONFIRMATION ==========
+// Add momentum confirmation using consecutive candles
+bullish_momentum = close > close[1] and close[1] > close[2]
+bearish_momentum = close < close[1] and close[1] < close[2]
+
+// ========== STOP LOSS AND TAKE PROFIT ==========
+long_sl = safe_get_swing_low(0)
+short_sl = safe_get_swing_high(0)
+
+// Calculate actual risk percentage
+long_risk = not na(long_sl) and long_sl < close ? (close - long_sl) / close * 100 : na
+short_risk = not na(short_sl) and short_sl > close ? (short_sl - close) / close * 100 : na
+
+// Only trade if risk is acceptable
+long_risk_ok = not na(long_risk) and long_risk > 0.5 and long_risk < max_risk_percent
+short_risk_ok = not na(short_risk) and short_risk > 0.5 and short_risk < max_risk_percent
+
+// Calculate R:R ratio
+long_potential_tp = not na(long_sl) ? close + (close - long_sl) * rr_ratio : na
+short_potential_tp = not na(short_sl) ? close - (short_sl - close) * rr_ratio : na
+
+// Ensure minimum R:R is met
+long_rr_ok = long_risk_ok and not na(long_potential_tp) and (long_potential_tp - close) / (close - long_sl) >= min_risk_reward
+short_rr_ok = short_risk_ok and not na(short_potential_tp) and (close - short_potential_tp) / (short_sl - close) >= min_risk_reward
+
+// ========== COMPREHENSIVE ENTRY CONDITIONS ==========
+long_entry = bullish_retest and 
+             (not use_volume_filter or volume_confirm) and
+             (not use_trend_filter or bullish_trend) and
+             (not use_rsi_filter or rsi_bullish) and
+             bullish_momentum and
+             long_rr_ok and
+             high_volatility and
+             hour_ok
+
+short_entry = bearish_retest and 
+              (not use_volume_filter or volume_confirm) and
+              (not use_trend_filter or bearish_trend) and
+              (not use_rsi_filter or rsi_bearish) and
+              bearish_momentum and
+              short_rr_ok and
+              high_volatility and
+              hour_ok
+
+// ========== POSITION SIZING ==========
+equity = strategy.initial_capital + strategy.netprofit
+risk_amount = equity * risk_percent / 100
+
+long_qty = long_risk_ok ? risk_amount / (long_risk / 100) : na
+short_qty = short_risk_ok ? risk_amount / (short_risk / 100) : na
+
+// ========== STRATEGY EXECUTION WITH TRAILING STOP ==========
+if long_entry and strategy.position_size == 0 and not na(long_qty) and not na(long_sl) and not na(long_potential_tp)
+    strategy.entry("Long", strategy.long, qty=long_qty)
+    if trailing_enabled
+        // Trailing stop activates after 50% of target
+        trail_offset = (close - long_sl) * 0.5
+        strategy.exit("Long Exit", "Long", stop=long_sl, limit=long_potential_tp, trail_price=close + trail_offset, trail_offset=trail_offset)
+    else
+        strategy.exit("Long Exit", "Long", stop=long_sl, limit=long_potential_tp)
+
+if short_entry and strategy.position_size == 0 and not na(short_qty) and not na(short_sl) and not na(short_potential_tp)
+    strategy.entry("Short", strategy.short, qty=short_qty)
+    if trailing_enabled
+        // Trailing stop activates after 50% of target
+        trail_offset = (short_sl - close) * 0.5
+        strategy.exit("Short Exit", "Short", stop=short_sl, limit=short_potential_tp, trail_price=close - trail_offset, trail_offset=trail_offset)
+    else
+        strategy.exit("Short Exit", "Short", stop=short_sl, limit=short_potential_tp)
+
+// ========== VISUALIZATION ==========
+// EMA Trend
+plot(use_trend_filter ? ema_trend : na, "EMA Trend", color=color.yellow, linewidth=2)
+
+// Swing Highs/Lows
+plotshape(swing_high, style=shape.triangledown, location=location.abovebar, color=color.red, size=size.small, title="Swing High")
+plotshape(swing_low, style=shape.triangleup, location=location.belowbar, color=color.green, size=size.small, title="Swing Low")
+
+// BOS Markers
+plotshape(bullish_bos, style=shape.flag, location=location.belowbar, color=color.lime, size=size.small, title="Bullish BOS")
+plotshape(bearish_bos, style=shape.flag, location=location.abovebar, color=color.red, size=size.small, title="Bearish BOS")
+
+// Retest Zones
+plot(bullish_retest_zone, "Bullish Retest Zone", color=color.new(color.lime, 70), style=plot.style_line, linewidth=1)
+plot(bearish_retest_zone, "Bearish Retest Zone", color=color.new(color.red, 70), style=plot.style_line, linewidth=1)
+
+// Entry Markers
+plotshape(long_entry, style=shape.triangleup, location=location.belowbar, color=color.green, size=size.normal, title="Long Entry")
+plotshape(short_entry, style=shape.triangledown, location=location.abovebar, color=color.red, size=size.normal, title="Short Entry")
+
+// Active Position SL/TP
+var float active_long_sl = na
+var float active_long_tp = na
+var float active_short_sl = na
+var float active_short_tp = na
+
+if long_entry and strategy.position_size == 0
+    active_long_sl := long_sl
+    active_long_tp := long_potential_tp
+    
+if short_entry and strategy.position_size == 0
+    active_short_sl := short_sl
+    active_short_tp := short_potential_tp
+
+if strategy.position_size == 0
+    active_long_sl := na
+    active_long_tp := na
+    active_short_sl := na
+    active_short_tp := na
+
+plot(strategy.position_size > 0 ? active_long_sl : na, "Long SL", color=color.red, style=plot.style_linebr, linewidth=2)
+plot(strategy.position_size > 0 ? active_long_tp : na, "Long TP", color=color.green, style=plot.style_linebr, linewidth=2)
+plot(strategy.position_size < 0 ? active_short_sl : na, "Short SL", color=color.red, style=plot.style_linebr, linewidth=2)
+plot(strategy.position_size < 0 ? active_short_tp : na, "Short TP", color=color.green, style=plot.style_linebr, linewidth=2)
+
+// ========== ALERTS ==========
+if long_entry
+    alert("🟢 LONG ENTRY\nPrice: " + str.tostring(close, "#.####") + "\nSL: " + str.tostring(long_sl, "#.####") + "\nTP: " + str.tostring(long_potential_tp, "#.####") + "\nR:R: " + str.tostring(rr_ratio, "#.#"), alert.freq_once_per_bar)
+    
+if short_entry
+    alert("🔴 SHORT ENTRY\nPrice: " + str.tostring(close, "#.####") + "\nSL: " + str.tostring(short_sl, "#.####") + "\nTP: " + str.tostring(short_potential_tp, "#.####") + "\nR:R: " + str.tostring(rr_ratio, "#.#"), alert.freq_once_per_bar)
+
+// ========== ENHANCED STATISTICS TABLE ==========
+var table stats_table = table.new(position.top_right, 2, 7, bgcolor=color.new(color.white, 90), border_width=1)
+
+if barstate.islast
+    table.cell(stats_table, 0, 0, "📊 Strategy Stats", bgcolor=color.new(color.blue, 70), text_color=color.white)
+    table.cell(stats_table, 1, 0, "Values", bgcolor=color.new(color.blue, 70), text_color=color.white)
+    
+    table.cell(stats_table, 0, 1, "Net Profit")
+    profit_color = strategy.netprofit > 0 ? color.green : color.red
+    table.cell(stats_table, 1, 1, str.tostring(strategy.netprofit, "#.##") + " USDT", text_color=profit_color)
+    
+    table.cell(stats_table, 0, 2, "Win Rate %")
+    total_trades = strategy.wintrades + strategy.losstrades
+    win_rate = total_trades > 0 ? strategy.wintrades / total_trades * 100 : 0
+    wr_color = win_rate >= 50 ? color.green : (win_rate >= 40 ? color.orange : color.red)
+    table.cell(stats_table, 1, 2, str.tostring(win_rate, "#.##") + "%", text_color=wr_color)
+    
+    table.cell(stats_table, 0, 3, "Profit Factor")
+    pf = strategy.grossprofit / math.max(strategy.grossloss, 1)
+    pf_color = pf >= 2 ? color.green : (pf >= 1 ? color.orange : color.red)
+    table.cell(stats_table, 1, 3, str.tostring(pf, "#.##"), text_color=pf_color)
+    
+    table.cell(stats_table, 0, 4, "Max Drawdown %")
+    table.cell(stats_table, 1, 4, str.tostring(strategy.max_drawdown, "#.##") + "%", text_color=color.red)
+    
+    table.cell(stats_table, 0, 5, "Total Trades")
+    table.cell(stats_table, 1, 5, str.tostring(total_trades, "#"))
+    
+    table.cell(stats_table, 0, 6, "Avg RR")
+    avg_win = strategy.wintrades > 0 ? strategy.grossprofit / strategy.wintrades : 0
+    avg_loss = strategy.losstrades > 0 ? strategy.grossloss / strategy.losstrades : 1
+    avg_rr = avg_loss > 0 ? avg_win / avg_loss : 0
+    table.cell(stats_table, 1, 6, str.tostring(avg_rr, "#.##"))
+
+// Background color for trend
+bgcolor(use_trend_filter ? (bullish_trend ? color.new(color.green, 95) : color.new(color.red, 95)) : na)

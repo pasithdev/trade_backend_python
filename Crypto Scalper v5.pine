@@ -1,0 +1,246 @@
+//@version=5
+strategy("Crypto Scalper v5", "Crypto Scalper", overlay=true, pyramiding=5, default_qty_type=strategy.percent_of_equity, default_qty_value=100, calc_on_every_tick=true)
+
+// ==============================
+// 1. USER INPUTS
+// ==============================
+// Trend and Timeframe Inputs
+i_trendTf          = input.timeframe("60", "Higher Trend Timeframe")
+i_emaFastLen       = input.int(21, "Fast EMA Length", minval=1)
+i_emaSlowLen       = input.int(50, "Slow EMA Length", minval=1)
+
+// Volatility and Market Filter Inputs
+i_atrLen           = input.int(14, "ATR Length", minval=1)
+i_atrMultSl        = input.float(1.5, "ATR Stop-Loss Multiplier", minval=0.5)
+i_atrMultTp        = input.float(4.0, "ATR Take-Profit Multiplier", minval=1.0)
+i_kamaLen          = input.int(20, "KAMA Length", minval=1)
+
+// Entry Logic Inputs
+i_volumeSpike      = input.float(1.7, "Volume Spike Threshold", minval=1.0)
+i_minCandleBody    = input.float(0.1, "Min. Candle Body %", minval=0.01, step=0.01) * 0.01
+i_swingLookback    = input.int(5, "Swing High/Low Lookback", minval=1)
+
+// Profit Protection & Risk Inputs
+i_equityRiskPct    = input.float(1.0, "Risk % of Equity", minval=0.1, step=0.1) * 0.01
+i_partialClosePct  = input.float(50, "Partial Close %", minval=1, maxval=99)
+i_trailAtrMult     = input.float(2.0, "Trailing Stop ATR Mult.", minval=0.1)
+
+// Frequency Control Inputs
+i_maxTradesPerHr   = input.int(3, "Max Trades Per Hour", minval=1)
+i_cooldownBars     = input.int(3, "Cooldown Bars After Loss", minval=0)
+
+// ==============================
+// 2. CORE INDICATORS
+// ==============================
+// Trend Direction (Higher TF)
+[htfFastEma, htfSlowEma] = request.security(syminfo.tickerid, i_trendTf, [ta.ema(close, i_emaFastLen), ta.ema(close, i_emaSlowLen)], gaps=barmerge.gaps_off, lookahead=barmerge.lookahead_off)
+htfTrendUp = htfFastEma > htfSlowEma
+htfTrendDn = htfFastEma < htfSlowEma
+
+// Volatility and Market Filters
+atrValue = ta.atr(i_atrLen)
+
+// Custom KAMA (Kaufman's Adaptive Moving Average) calculation
+kama_er = math.abs(ta.change(close, i_kamaLen)) / math.sum(math.abs(ta.change(close)), i_kamaLen)
+kama_fast = 2.0 / (2.0 + 1.0)
+kama_slow = 2.0 / (30.0 + 1.0)
+kama_sc = math.pow(kama_er * (kama_fast - kama_slow) + kama_slow, 2)
+var float kamaValue = close
+kamaValue := nz(kamaValue[1]) + kama_sc * (close - nz(kamaValue[1]))
+
+priceAboveKama = close > kamaValue
+priceBelowKama = close < kamaValue
+
+// Volume and Momentum
+volumeAvg = ta.sma(volume, 20)
+volumeSpike = volume > (volumeAvg * i_volumeSpike)
+candleBodySize = math.abs(close - open) / close
+validCandleBody = candleBodySize > i_minCandleBody
+
+// Micro-Structure (Swing Highs/Lows)
+swingHigh = ta.highest(high, i_swingLookback) == high[i_swingLookback]
+swingLow = ta.lowest(low, i_swingLookback) == low[i_swingLookback]
+
+// ==============================
+// 3. MARKET REGIME FILTER
+// ==============================
+// Detect Chop/Sideways Market (using KAMA flatness)
+kamaChange = math.abs(kamaValue - kamaValue[1]) / kamaValue
+marketChop = kamaChange < (atrValue / close * 0.5) and atrValue < ta.percentile_linear_interpolation(atrValue, 100, 30) // Low volatility
+
+// ==============================
+// 4. INTELLIGENT ENTRY LOGIC
+// ==============================
+// Long Conditions: Higher TF Trend Up + Micro-breakout structure
+longBreakout = not marketChop and htfTrendUp and volumeSpike and validCandleBody and close > high[i_swingLookback] and priceAboveKama
+// Short Conditions: Higher TF Trend Dn + Micro-breakdown structure
+shortBreakout = not marketChop and htfTrendDn and volumeSpike and validCandleBody and close < low[i_swingLookback] and priceBelowKama
+
+// ==============================
+// 5. FREQUENCY & COOLDOWN CONTROL
+// ==============================
+// Max Trades Per Hour
+var int hourTradesCount = 0
+var int lastHour = hour
+
+if hour != lastHour
+    hourTradesCount := 0
+    lastHour := hour
+
+canTrade = hourTradesCount < i_maxTradesPerHr
+
+// Cooldown after loss
+var int barsSinceLoss = i_cooldownBars + 1
+if strategy.closedtrades > 0
+    if strategy.closedtrades.profit(strategy.closedtrades - 1) < 0
+        barsSinceLoss := 0
+    else
+        barsSinceLoss := barsSinceLoss + 1
+else
+    barsSinceLoss := barsSinceLoss + 1
+
+cooldownOver = barsSinceLoss >= i_cooldownBars
+
+// Final Entry Conditions
+enterLong = longBreakout and canTrade and cooldownOver and strategy.position_size == 0
+enterShort = shortBreakout and canTrade and cooldownOver and strategy.position_size == 0
+
+// ==============================
+// 6. SMART TRADE MANAGEMENT
+// ==============================
+// Dynamic Position Sizing based on Equity Risk
+stopDistance = atrValue * i_atrMultSl
+positionSize = (strategy.initial_capital * i_equityRiskPct) / stopDistance
+
+// Calculate Entry Price and Key Levels
+entryPrice = enterLong ? close : enterShort ? close : na
+longSl = entryPrice - stopDistance
+longTp = entryPrice + (atrValue * i_atrMultTp)
+shortSl = entryPrice + stopDistance
+shortTp = entryPrice - (atrValue * i_atrMultTp)
+
+// Partial Close and Trailing Stop Logic
+var bool partialClosed = false
+var float trailStop = na
+
+if strategy.position_size > 0 and not partialClosed and close >= (entryPrice + (longTp - entryPrice) * 0.5) // 50% to first TP
+    strategy.close("Long", qty_percent = i_partialClosePct)
+    partialClosed := true
+    trailStop := close - (atrValue * i_trailAtrMult)
+else if strategy.position_size > 0 and partialClosed
+    trailStop := math.max(nz(trailStop), close - (atrValue * i_trailAtrMult))
+    if close <= trailStop
+        strategy.close("Long")
+
+if strategy.position_size < 0 and not partialClosed and close <= (entryPrice - (entryPrice - shortTp) * 0.5)
+    strategy.close("Short", qty_percent = i_partialClosePct)
+    partialClosed := true
+    trailStop := close + (atrValue * i_trailAtrMult)
+else if strategy.position_size < 0 and partialClosed
+    trailStop := math.min(nz(trailStop), close + (atrValue * i_trailAtrMult))
+    if close >= trailStop
+        strategy.close("Short")
+
+// Reset trail and partial close flags on new entry
+if enterLong or enterShort
+    partialClosed := false
+    trailStop := na
+
+// ==============================
+// 7. EXECUTE ORDERS
+// ==============================
+if enterLong
+    hourTradesCount += 1
+    strategy.entry("Long", strategy.long, qty=positionSize)
+    strategy.exit("Long Exit", "Long", stop=longSl, limit=longTp)
+
+if enterShort
+    hourTradesCount += 1
+    strategy.entry("Short", strategy.short, qty=positionSize)
+    strategy.exit("Short Exit", "Short", stop=shortSl, limit=shortTp)
+
+// ==============================
+// 8. ADVANCED VISUALIZATION
+// ==============================
+// Plot EMAs for trend visualization
+plot(htfFastEma, color=color.new(color.blue, 0), linewidth=2, title="Fast EMA (HTF)")
+plot(htfSlowEma, color=color.new(color.red, 0), linewidth=2, title="Slow EMA (HTF)")
+
+// Plot KAMA
+plot(kamaValue, color=color.new(color.orange, 0), linewidth=2, title="KAMA")
+
+// Plot Entry Signals with Labels
+plotshape(enterLong, style=shape.triangleup, location=location.belowbar, color=color.new(color.green, 0), size=size.normal, title="Long Entry Signal")
+plotshape(enterShort, style=shape.triangledown, location=location.abovebar, color=color.new(color.red, 0), size=size.normal, title="Short Entry Signal")
+
+// Add text labels for entries
+if enterLong
+    label.new(bar_index, low, text="BUY\n" + str.tostring(close, "#.##"), style=label.style_label_up, color=color.new(color.green, 0), textcolor=color.white, size=size.normal)
+    
+if enterShort
+    label.new(bar_index, high, text="SELL\n" + str.tostring(close, "#.##"), style=label.style_label_down, color=color.new(color.red, 0), textcolor=color.white, size=size.normal)
+
+// Plot potential setup signals (before entry confirmation)
+potentialLong = htfTrendUp and volumeSpike and validCandleBody and priceAboveKama and not marketChop
+potentialShort = htfTrendDn and volumeSpike and validCandleBody and priceBelowKama and not marketChop
+
+plotshape(potentialLong and not enterLong, style=shape.circle, location=location.belowbar, color=color.new(color.lime, 60), size=size.tiny, title="Potential Long")
+plotshape(potentialShort and not enterShort, style=shape.circle, location=location.abovebar, color=color.new(color.orange, 60), size=size.tiny, title="Potential Short")
+
+// Plot SL/TP Lines with better visibility
+var line slLine = na
+var line tpLine = na
+
+if strategy.position_size > 0
+    if na(slLine)
+        slLine := line.new(bar_index, longSl, bar_index + 1, longSl, color=color.new(color.red, 0), width=2, style=line.style_solid)
+        tpLine := line.new(bar_index, longTp, bar_index + 1, longTp, color=color.new(color.green, 0), width=2, style=line.style_solid)
+    else
+        line.set_x2(slLine, bar_index)
+        line.set_x2(tpLine, bar_index)
+else if strategy.position_size < 0
+    if na(slLine)
+        slLine := line.new(bar_index, shortSl, bar_index + 1, shortSl, color=color.new(color.red, 0), width=2, style=line.style_solid)
+        tpLine := line.new(bar_index, shortTp, bar_index + 1, shortTp, color=color.new(color.green, 0), width=2, style=line.style_solid)
+    else
+        line.set_x2(slLine, bar_index)
+        line.set_x2(tpLine, bar_index)
+else
+    if not na(slLine)
+        line.delete(slLine)
+        line.delete(tpLine)
+        slLine := na
+        tpLine := na
+
+// Plot trailing stop
+plot(strategy.position_size != 0 ? trailStop : na, color=color.new(color.purple, 0), style=plot.style_linebr, linewidth=2, title="Trailing Stop")
+
+// Highlight Market Conditions
+bgcolor(marketChop ? color.new(color.gray, 85) : na, title="Chop Zone")
+bgcolor(htfTrendUp and not marketChop ? color.new(color.green, 95) : na, title="Bullish Trend")
+bgcolor(htfTrendDn and not marketChop ? color.new(color.red, 95) : na, title="Bearish Trend")
+
+// Volume spike indication
+barcolor(volumeSpike ? color.new(color.yellow, 50) : na, title="Volume Spike")
+
+// Display Stats Table
+var table statsTable = table.new(position.top_right, 2, 5, bgcolor=color.new(color.black, 80), border_width=1, border_color=color.gray)
+if barstate.islast
+    table.cell(statsTable, 0, 0, "Win Rate", bgcolor=color.new(color.gray, 50), text_color=color.white)
+    winRate = strategy.wintrades + strategy.losstrades > 0 ? strategy.wintrades / (strategy.wintrades + strategy.losstrades) * 100 : 0
+    table.cell(statsTable, 1, 0, str.tostring(winRate, "#.##") + "%", text_color=color.white)
+    
+    table.cell(statsTable, 0, 1, "Net Profit", bgcolor=color.new(color.gray, 50), text_color=color.white)
+    table.cell(statsTable, 1, 1, str.tostring(strategy.netprofit, "#.##"), text_color=strategy.netprofit > 0 ? color.green : color.red)
+    
+    table.cell(statsTable, 0, 2, "Profit Factor", bgcolor=color.new(color.gray, 50), text_color=color.white)
+    profitFactor = strategy.grossloss != 0 ? strategy.grossprofit / strategy.grossloss : 0
+    table.cell(statsTable, 1, 2, str.tostring(profitFactor, "#.##"), text_color=color.white)
+    
+    table.cell(statsTable, 0, 3, "Total Trades", bgcolor=color.new(color.gray, 50), text_color=color.white)
+    table.cell(statsTable, 1, 3, str.tostring(strategy.closedtrades), text_color=color.white)
+    
+    table.cell(statsTable, 0, 4, "Open Position", bgcolor=color.new(color.gray, 50), text_color=color.white)
+    posText = strategy.position_size > 0 ? "LONG" : strategy.position_size < 0 ? "SHORT" : "NONE"
+    posColor = strategy.position_size > 0 ? color.green : strategy.position_size < 0 ? color.red : color.gray
+    table.cell(statsTable, 1, 4, posText, text_color=posColor)

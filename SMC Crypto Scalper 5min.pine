@@ -1,0 +1,150 @@
+//@version=5
+strategy("SMC Crypto Scalper 5min", overlay=true, margin_long=100, margin_short=100, pyramiding=0, initial_capital=10000, default_qty_type=strategy.percent_of_equity, default_qty_value=2, commission_type=strategy.commission.percent, commission_value=0.1)
+
+// Input Parameters
+lookback = input.int(20, "Swing Lookback Period", minval=5)
+risk_percent = input.float(2.0, "Risk % per Trade", minval=0.1, maxval=10.0)
+rr_ratio = input.float(2.0, "Risk/Reward Ratio", minval=1.0, maxval=5.0)
+use_volume_filter = input.bool(true, "Use Volume Filter")
+trailing_enabled = input.bool(false, "Enable Trailing Stop")
+
+// Swing High/Low Detection
+swing_high = ta.highest(high, lookback * 2 + 1) == high[lookback]
+swing_low = ta.lowest(low, lookback * 2 + 1) == low[lookback]
+
+// Store swing levels in arrays
+var float[] swing_highs = array.new<float>()
+var float[] swing_lows = array.new<float>()
+var int[] swing_high_bars = array.new<int>()
+var int[] swing_low_bars = array.new<int>()
+
+if swing_high
+    array.unshift(swing_highs, high[lookback])
+    array.unshift(swing_high_bars, bar_index[lookback])
+    // Keep only recent swings
+    if array.size(swing_highs) > 10
+        array.pop(swing_highs)
+        array.pop(swing_high_bars)
+
+if swing_low
+    array.unshift(swing_lows, low[lookback])
+    array.unshift(swing_low_bars, bar_index[lookback])
+    if array.size(swing_lows) > 10
+        array.pop(swing_lows)
+        array.pop(swing_low_bars)
+
+// Helper functions to safely get array values
+safe_get_swing_high(index) =>
+    array.size(swing_highs) > index ? array.get(swing_highs, index) : na
+
+safe_get_swing_low(index) =>
+    array.size(swing_lows) > index ? array.get(swing_lows, index) : na
+
+// Get most recent swings
+recent_swing_high = safe_get_swing_high(0)
+recent_swing_low = safe_get_swing_low(0)
+
+// BOS/CHOCH Detection
+bullish_bos = false
+bearish_bos = false
+
+prev_swing_high = safe_get_swing_high(1)
+prev_swing_low = safe_get_swing_low(1)
+
+if not na(prev_swing_high) and close > prev_swing_high
+    bullish_bos := true
+
+if not na(prev_swing_low) and close < prev_swing_low
+    bearish_bos := true
+
+// Retest Zones
+bullish_retest_zone = prev_swing_high
+bearish_retest_zone = prev_swing_low
+
+// Retest Confirmation
+bullish_retest = bullish_bos and not na(bullish_retest_zone) and low <= bullish_retest_zone and close > bullish_retest_zone
+bearish_retest = bearish_bos and not na(bearish_retest_zone) and high >= bearish_retest_zone and close < bearish_retest_zone
+
+// Volume Filter
+volume_avg = ta.sma(volume, 20)
+volume_confirm = volume > volume_avg
+
+// Entry Conditions
+long_entry = bullish_retest and (not use_volume_filter or volume_confirm)
+short_entry = bearish_retest and (not use_volume_filter or volume_confirm)
+
+// Stop Loss and Take Profit
+long_sl = safe_get_swing_low(0)
+short_sl = safe_get_swing_high(0)
+
+long_risk = not na(long_sl) ? (close - long_sl) / close * 100 : na
+short_risk = not na(short_sl) ? (short_sl - close) / close * 100 : na
+
+long_tp = not na(long_sl) ? close + (close - long_sl) * rr_ratio : na
+short_tp = not na(short_sl) ? close - (short_sl - close) * rr_ratio : na
+
+// Position Sizing
+equity = strategy.initial_capital + strategy.netprofit
+risk_amount = equity * risk_percent / 100
+
+long_qty = not na(long_risk) and long_risk > 0 and long_risk < 100 ? risk_amount / (long_risk / 100) : na
+short_qty = not na(short_risk) and short_risk > 0 and short_risk < 100 ? risk_amount / (short_risk / 100) : na
+
+// Strategy Execution
+if long_entry and strategy.position_size == 0 and not na(long_qty) and not na(long_sl) and not na(long_tp)
+    strategy.entry("Long", strategy.long, qty=long_qty)
+    strategy.exit("Long Exit", "Long", stop=long_sl, limit=long_tp, trail_points=trailing_enabled and not na(long_risk) ? long_risk * 100 : na)
+
+if short_entry and strategy.position_size == 0 and not na(short_qty) and not na(short_sl) and not na(short_tp)
+    strategy.entry("Short", strategy.short, qty=short_qty)
+    strategy.exit("Short Exit", "Short", stop=short_sl, limit=short_tp, trail_points=trailing_enabled and not na(short_risk) ? short_risk * 100 : na)
+
+// Visualization
+// Swing Highs/Lows
+plotshape(swing_high, style=shape.triangledown, location=location.abovebar, color=color.red, size=size.small, title="Swing High")
+plotshape(swing_low, style=shape.triangleup, location=location.belowbar, color=color.green, size=size.small, title="Swing Low")
+
+// BOS/CHOCH Markers
+plotshape(bullish_bos, style=shape.flag, location=location.belowbar, color=color.lime, size=size.small, title="Bullish BOS")
+plotshape(bearish_bos, style=shape.flag, location=location.abovebar, color=color.red, size=size.small, title="Bearish BOS")
+
+// Retest Zones
+plot(bullish_retest_zone, "Bullish Retest Zone", color=color.lime, style=plot.style_line, linewidth=2)
+plot(bearish_retest_zone, "Bearish Retest Zone", color=color.red, style=plot.style_line, linewidth=2)
+
+// Entry Markers
+plotshape(long_entry, style=shape.triangleup, location=location.belowbar, color=color.green, size=size.normal, title="Long Entry")
+plotshape(short_entry, style=shape.triangledown, location=location.abovebar, color=color.red, size=size.normal, title="Short Entry")
+
+// SL/TP Lines
+plot(strategy.position_size > 0 ? long_sl : na, "Long SL", color=color.red, style=plot.style_linebr)
+plot(strategy.position_size > 0 ? long_tp : na, "Long TP", color=color.green, style=plot.style_linebr)
+plot(strategy.position_size < 0 ? short_sl : na, "Short SL", color=color.red, style=plot.style_linebr)
+plot(strategy.position_size < 0 ? short_tp : na, "Short TP", color=color.green, style=plot.style_linebr)
+
+// Alerts for entries
+if long_entry
+    alert("Long Entry - Price: " + str.tostring(close), alert.freq_once_per_bar)
+if short_entry
+    alert("Short Entry - Price: " + str.tostring(close), alert.freq_once_per_bar)
+
+// Strategy Statistics Table
+var table stats_table = table.new(position.top_right, 2, 5, bgcolor=color.white, border_width=1)
+
+if barstate.islast
+    table.cell(stats_table, 0, 0, "Strategy Stats", bgcolor=color.gray)
+    table.cell(stats_table, 1, 0, "Values", bgcolor=color.gray)
+    
+    table.cell(stats_table, 0, 1, "Net Profit")
+    table.cell(stats_table, 1, 1, str.tostring(strategy.netprofit, "#.##"))
+    
+    table.cell(stats_table, 0, 2, "Win Rate %")
+    total_trades = strategy.wintrades + strategy.losstrades
+    win_rate = total_trades > 0 ? strategy.wintrades / total_trades * 100 : 0
+    table.cell(stats_table, 1, 2, str.tostring(win_rate, "#.##"))
+    
+    table.cell(stats_table, 0, 3, "Max Drawdown %")
+    table.cell(stats_table, 1, 3, str.tostring(strategy.max_drawdown, "#.##"))
+    
+    table.cell(stats_table, 0, 4, "Total Trades")
+    table.cell(stats_table, 1, 4, str.tostring(total_trades, "#"))

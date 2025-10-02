@@ -1,0 +1,130 @@
+//@version=5
+strategy("Market Maker Trap Strategy - Crypto 5min", overlay=true, margin_long=100, margin_short=100, pyramiding=0)
+
+// Input parameters
+lengthHMA = input.int(21, title="Hull MA Length", minval=1)
+lengthRSI = input.int(14, title="RSI Length", minval=1)
+rsiOverbought = input.int(70, title="RSI Overbought")
+rsiOversold = input.int(30, title="RSI Oversold")
+sweepThreshold = input.float(0.1, title="Sweep Threshold %", minval=0.05, maxval=1.0) / 100
+stopLossPercent = input.float(1.5, title="Stop Loss %", minval=0.5, maxval=5.0) / 100
+trailOffset = input.float(0.8, title="Trailing Stop Offset %", minval=0.1, maxval=2.0) / 100
+
+// Secret Moving Average - Hull Moving Average
+hma(src, length) =>
+    ta.wma(2 * ta.wma(src, length / 2) - ta.wma(src, length), math.round(math.sqrt(length)))
+
+hmaValue = hma(close, lengthHMA)
+
+// RSI with Divergence Detection
+rsiValue = ta.rsi(close, lengthRSI)
+
+// Detect RSI Divergence
+detectDivergence() =>
+    float bearishDiv = na
+    float bullishDiv = na
+    
+    // Look for regular bearish divergence (price higher high, RSI lower high)
+    if ta.highest(high, 5) == high[2] and ta.highest(rsiValue, 5) == rsiValue[4]
+        bearishDiv := 1
+    else
+        bearishDiv := 0
+    
+    // Look for regular bullish divergence (price lower low, RSI higher low)
+    if ta.lowest(low, 5) == low[2] and ta.lowest(rsiValue, 5) == rsiValue[4]
+        bullishDiv := 1
+    else
+        bullishDiv := 0
+    
+    [bullishDiv, bearishDiv]
+
+[bullishDivergence, bearishDivergence] = detectDivergence()
+
+// Support and Resistance Levels using Recent Highs/Lows
+lookbackPeriod = 20
+resistanceLevel = ta.highest(high, lookbackPeriod)[1]
+supportLevel = ta.lowest(low, lookbackPeriod)[1]
+
+// Liquidity Sweep Detection
+detectLiquiditySweep(direction) =>
+    if direction == "long"
+        // Long setup: price sweeps below support then rejects back up
+        sweepLow = low <= supportLevel * (1 - sweepThreshold)
+        rejectionCandle = close > open and high > hmaValue and low < supportLevel
+        wickRejection = (close - low) > (high - close) * 1.5 // Long lower wick
+        sweepLow and rejectionCandle and wickRejection
+    else
+        // Short setup: price sweeps above resistance then rejects back down
+        sweepHigh = high >= resistanceLevel * (1 + sweepThreshold)
+        rejectionCandle = close < open and low < hmaValue and high > resistanceLevel
+        wickRejection = (high - close) > (close - low) * 1.5 // Long upper wick
+        sweepHigh and rejectionCandle and wickRejection
+
+// Market Structure Analysis
+isMarketUpTrend = hmaValue > hmaValue[5]
+isMarketDownTrend = hmaValue < hmaValue[5]
+
+// Entry Conditions
+longCondition = detectLiquiditySweep("long") and bullishDivergence and isMarketUpTrend and rsiValue < rsiOverbought
+shortCondition = detectLiquiditySweep("short") and bearishDivergence and isMarketDownTrend and rsiValue > rsiOversold
+
+// Position Sizing
+positionSize = strategy.equity * 0.1 / (close * stopLossPercent)
+
+// Strategy Logic
+if longCondition
+    strategy.entry("Long", strategy.long, qty=positionSize)
+    strategy.exit("Long Exit", "Long", stop=close * (1 - stopLossPercent), trail_points=close * trailOffset > 0 ? 1 : na, trail_offset=close * trailOffset)
+
+if shortCondition
+    strategy.entry("Short", strategy.short, qty=positionSize)
+    strategy.exit("Short Exit", "Short", stop=close * (1 + stopLossPercent), trail_points=close * trailOffset > 0 ? 1 : na, trail_offset=close * trailOffset)
+
+// Dynamic Stop Loss Calculation
+longStopPrice = strategy.position_avg_price * (1 - stopLossPercent)
+shortStopPrice = strategy.position_avg_price * (1 + stopLossPercent)
+
+// Plotting
+plot(hmaValue, color=color.blue, linewidth=2, title="Hull MA")
+plot(supportLevel, color=color.green, style=plot.style_circles, title="Support")
+plot(resistanceLevel, color=color.red, style=plot.style_circles, title="Resistance")
+
+// Background colors for market structure
+bgcolor(isMarketUpTrend ? color.new(color.green, 95) : isMarketDownTrend ? color.new(color.red, 95) : na)
+
+// Alerts for entries
+plotshape(longCondition, style=shape.triangleup, location=location.belowbar, color=color.green, size=size.small, title="Long Signal")
+plotshape(shortCondition, style=shape.triangledown, location=location.abovebar, color=color.red, size=size.small, title="Short Signal")
+
+// Performance Metrics Table
+var table infoTable = table.new(position.top_right, 2, 8, bgcolor=color.white, border_width=1)
+
+if barstate.islast
+    table.cell(infoTable, 0, 0, "Strategy Performance", text_color=color.black, bgcolor=color.blue)
+    table.cell(infoTable, 1, 0, "Values", text_color=color.black, bgcolor=color.blue)
+    
+    table.cell(infoTable, 0, 1, "Total Trades")
+    table.cell(infoTable, 1, 1, str.tostring(strategy.closedtrades))
+    
+    table.cell(infoTable, 0, 2, "Win Rate %")
+    winRate = strategy.wintrades / strategy.closedtrades * 100
+    table.cell(infoTable, 1, 2, str.tostring(winRate, "#.##"))
+    
+    table.cell(infoTable, 0, 3, "Profit Factor")
+    table.cell(infoTable, 1, 3, str.tostring(strategy.grossprofit / math.max(1, strategy.grossloss)))
+    
+    table.cell(infoTable, 0, 4, "Total Net Profit")
+    table.cell(infoTable, 1, 4, str.tostring(strategy.netprofit))
+    
+    table.cell(infoTable, 0, 5, "Max Drawdown %")
+    table.cell(infoTable, 1, 5, str.tostring(strategy.max_drawdown / strategy.initial_capital * 100, "#.##"))
+    
+    table.cell(infoTable, 0, 6, "Avg Trade")
+    table.cell(infoTable, 1, 6, str.tostring(strategy.netprofit / math.max(1, strategy.closedtrades)))
+    
+    table.cell(infoTable, 0, 7, "Current Equity")
+    table.cell(infoTable, 1, 7, str.tostring(strategy.equity))
+
+// Display current signals on chart
+plotchar(longCondition, "Long", "▲", location.belowbar, color.lime, size=size.tiny)
+plotchar(shortCondition, "Short", "▼", location.abovebar, color.red, size=size.tiny)

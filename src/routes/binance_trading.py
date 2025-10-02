@@ -770,9 +770,11 @@ def execute_tradingview_trade(alert_data):
         # Execute main futures order
         side = 'BUY' if action == 'buy' else 'SELL'
         
-        # Generate unique client order ID for better tracking
+        # Generate unique client order ID for better tracking (must be < 36 chars)
         import uuid
-        client_order_id = f"TV_{action}_{symbol}_{int(datetime.now().timestamp())}"
+        action_abbr = 'B' if action == 'buy' else 'S'
+        timestamp_short = str(int(datetime.now().timestamp()))[-8:]
+        client_order_id = f"TV_{action_abbr}_{timestamp_short}"
         
         main_order = call_binance_api(binance_client.futures_create_order,
             symbol=symbol,
@@ -838,7 +840,9 @@ def execute_tradingview_trade(alert_data):
             # Place Take Profit order
             if final_tp_price:
                 try:
-                    tp_client_order_id = f"TP_{action}_{symbol}_{int(datetime.now().timestamp())}"
+                    action_abbr = 'B' if action == 'buy' else 'S'
+                    timestamp_short = str(int(datetime.now().timestamp()))[-8:]
+                    tp_client_order_id = f"TP_{action_abbr}_{timestamp_short}"
                     tp_order = call_binance_api(binance_client.futures_create_order,
                         symbol=symbol,
                         side=close_side,
@@ -857,7 +861,9 @@ def execute_tradingview_trade(alert_data):
             # Place Stop Loss order
             if final_sl_price:
                 try:
-                    sl_client_order_id = f"SL_{action}_{symbol}_{int(datetime.now().timestamp())}"
+                    action_abbr = 'B' if action == 'buy' else 'S'
+                    timestamp_short = str(int(datetime.now().timestamp()))[-8:]
+                    sl_client_order_id = f"SL_{action_abbr}_{timestamp_short}"
                     sl_order = call_binance_api(binance_client.futures_create_order,
                         symbol=symbol,
                         side=close_side,
@@ -1031,9 +1037,13 @@ def close_opposite_position_immediate(symbol, new_action):
                 logger.info(f"⚠️  FOUND LONG POSITION: {position_amt} {symbol} - MUST CLOSE IMMEDIATELY before SELL")
             
             if should_close:
-                # Generate unique client order ID for closing order
+                # Generate unique client order ID for closing order (must be < 36 chars)
+                # Format: CL_{S/L}_{timestamp}_{uuid} where S=Short, L=Long
                 import uuid
-                close_client_order_id = f"CLOSE_{position_type}_{symbol}_{int(datetime.now().timestamp())}_{str(uuid.uuid4())[:8]}"
+                position_abbr = 'S' if position_type == 'SHORT' else 'L'
+                timestamp_short = str(int(datetime.now().timestamp()))[-8:]  # Last 8 digits
+                uuid_short = str(uuid.uuid4())[:6]  # First 6 chars of UUID
+                close_client_order_id = f"CL_{position_abbr}_{timestamp_short}_{uuid_short}"
                 
                 # IMMEDIATELY close the position with MARKET order
                 logger.info(f"🚀 CLOSING {position_type} POSITION IMMEDIATELY: {close_side} {close_quantity} {symbol}")
@@ -1653,9 +1663,13 @@ def target_trend_webhook():
         # Step 5: IMMEDIATELY execute main entry order with unique client ID
         side = 'BUY' if action == 'buy' else 'SELL'
         
-        # Generate unique client order ID for tracking
+        # Generate unique client order ID for tracking (must be < 36 chars)
+        # Format: TT_{B/S}_{timestamp}_{uuid}
         import uuid
-        client_order_id = f"TT_{action.upper()}_{symbol}_{int(datetime.now().timestamp())}_{str(uuid.uuid4())[:8]}"
+        action_abbr = 'B' if action == 'buy' else 'S'
+        timestamp_short = str(int(datetime.now().timestamp()))[-8:]  # Last 8 digits
+        uuid_short = str(uuid.uuid4())[:6]  # First 6 chars of UUID
+        client_order_id = f"TT_{action_abbr}_{timestamp_short}_{uuid_short}"
         
         logger.info(f"Step 5: Executing {action} order immediately after position closure")
         
