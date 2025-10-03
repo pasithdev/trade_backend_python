@@ -29,6 +29,10 @@ i_trailAtrMult     = input.float(2.0, "Trailing Stop ATR Mult.", minval=0.1)
 i_maxTradesPerHr   = input.int(3, "Max Trades Per Hour", minval=1)
 i_cooldownBars     = input.int(3, "Cooldown Bars After Loss", minval=0)
 
+// Webhook Settings
+balance_percentage = input.float(0.25, "Order Quantity (% of equity)", minval=0.01, maxval=1.0, step=0.01, group="Webhook Settings", tooltip="Percentage of balance to use (0.25 = 25%)")
+leverage = input.int(10, "Leverage", minval=1, maxval=125, group="Webhook Settings", tooltip="Leverage multiplier for futures trading")
+
 // ==============================
 // 2. CORE INDICATORS
 // ==============================
@@ -149,15 +153,24 @@ if enterLong or enterShort
 // ==============================
 // 7. EXECUTE ORDERS
 // ==============================
+// JSON Alert Messages for Advanced Trading Webhook
+buy_alert_message = '{"symbol": "' + syminfo.ticker + 'USDT", "action": "buy", "balance_percentage": ' + str.tostring(balance_percentage) + ', "leverage": ' + str.tostring(leverage) + ', "entry": ' + str.tostring(close) + '}'
+
+sell_alert_message = '{"symbol": "' + syminfo.ticker + 'USDT", "action": "sell", "balance_percentage": ' + str.tostring(balance_percentage) + ', "leverage": ' + str.tostring(leverage) + ', "entry": ' + str.tostring(close) + '}'
+
+close_alert_message = '{"symbol": "' + syminfo.ticker + 'USDT", "action": "close", "balance_percentage": ' + str.tostring(balance_percentage) + ', "leverage": ' + str.tostring(leverage) + ', "entry": ' + str.tostring(close) + '}'
+
 if enterLong
     hourTradesCount += 1
     strategy.entry("Long", strategy.long, qty=positionSize)
     strategy.exit("Long Exit", "Long", stop=longSl, limit=longTp)
+    alert(buy_alert_message, alert.freq_once_per_bar_close)
 
 if enterShort
     hourTradesCount += 1
     strategy.entry("Short", strategy.short, qty=positionSize)
     strategy.exit("Short Exit", "Short", stop=shortSl, limit=shortTp)
+    alert(sell_alert_message, alert.freq_once_per_bar_close)
 
 // ==============================
 // 8. ADVANCED VISUALIZATION

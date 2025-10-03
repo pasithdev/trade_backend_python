@@ -1329,14 +1329,15 @@ def get_fallback_symbol_requirements(symbol):
     
     return None
 
-def calculate_position_quantity(symbol, balance_percentage=0.20, leverage=10):
+def calculate_position_quantity(symbol, balance_percentage=0.20, leverage=10, auto_reduce=True):
     """
-    Calculate position quantity based on account balance percentage
+    Calculate position quantity based on account balance percentage with smart auto-reduction
     
     Args:
         symbol: Trading symbol (e.g., 'BTCUSDT')
         balance_percentage: Percentage of balance to use (default 20% = 0.20)
         leverage: Leverage multiplier (default 10x)
+        auto_reduce: Automatically reduce position size if insufficient balance (default True)
     
     Returns:
         dict: {'success': bool, 'quantity': float, 'details': dict}
@@ -1346,58 +1347,148 @@ def calculate_position_quantity(symbol, balance_percentage=0.20, leverage=10):
     try:
         logger.info(f"Calculating position quantity for {symbol} using {balance_percentage*100}% of balance with {leverage}x leverage")
         
-        # Step 1: Get account balance
+        # Step 1: Get account balance and positions
         account_info = call_binance_api(binance_client.futures_account)
         total_balance = float(account_info['totalWalletBalance'])
         available_balance = float(account_info['availableBalance'])
         
+        # Get current positions to check margin usage
+        positions = call_binance_api(binance_client.futures_position_information)
+        total_position_value = sum(abs(float(p['positionAmt']) * float(p['entryPrice'])) for p in positions if float(p['positionAmt']) != 0)
+        used_margin = sum(abs(float(p['initialMargin'])) for p in positions if float(p['positionAmt']) != 0)
+        
         logger.info(f"Account balance - Total: {total_balance} USDT, Available: {available_balance} USDT")
+        logger.info(f"Current positions - Total Value: {total_position_value} USDT, Used Margin: {used_margin} USDT")
         
-        # Step 2: Calculate position size in USDT
-        position_value_usdt = available_balance * balance_percentage * leverage
-        
-        logger.info(f"Position value: {available_balance} * {balance_percentage} * {leverage} = {position_value_usdt} USDT")
-        
-        # Step 3: Get current market price
-        ticker = call_binance_api(binance_client.futures_symbol_ticker, symbol=symbol)
-        current_price = float(ticker['price'])
-        
-        logger.info(f"Current {symbol} price: {current_price}")
-        
-        # Step 4: Calculate quantity
-        raw_quantity = position_value_usdt / current_price
-        
-        # Step 5: Get symbol precision info for rounding
+        # Step 2: Get symbol info first
         exchange_info = call_binance_api(binance_client.futures_exchange_info)
         symbol_info = next(s for s in exchange_info['symbols'] if s['symbol'] == symbol)
         lot_size_filter = next(f for f in symbol_info['filters'] if f['filterType'] == 'LOT_SIZE')
         step_size = float(lot_size_filter['stepSize'])
+        min_qty = float(lot_size_filter['minQty'])
+        max_qty = float(lot_size_filter['maxQty'])
+        
+        # Get current market price
+        ticker = call_binance_api(binance_client.futures_symbol_ticker, symbol=symbol)
+        current_price = float(ticker['price'])
+        
+        logger.info(f"Current {symbol} price: {current_price}")
+        logger.info(f"Symbol limits - Min: {min_qty}, Max: {max_qty}, Step: {step_size}")
+        
+        # Step 3: Calculate initial position size in USDT
+        requested_position_value = available_balance * balance_percentage * leverage
+        
+        # Step 4: Smart reduction logic - ensure we can actually open the position
+        # Reserve some margin for safety (5% buffer)
+        safety_buffer = 0.95
+        max_position_value = available_balance * leverage * safety_buffer
+        
+        # Calculate required margin for the position
+        required_margin = requested_position_value / leverage
+        
+        # Check if we have enough available balance
+        if required_margin > available_balance and auto_reduce:
+            logger.warning(f"Insufficient balance: Required margin {required_margin} USDT > Available {available_balance} USDT")
+            logger.info(f"Auto-reducing position size to fit available balance...")
+            
+            # Reduce to maximum we can afford
+            requested_position_value = max_position_value
+            required_margin = requested_position_value / leverage
+            
+            actual_balance_percentage = (requested_position_value / leverage) / available_balance
+            logger.info(f"Reduced position from {balance_percentage*100}% to {actual_balance_percentage*100:.2f}% of balance")
+        
+        # Further reduce if still too large
+        if requested_position_value > max_position_value and auto_reduce:
+            logger.warning(f"Position value {requested_position_value} exceeds maximum {max_position_value}")
+            requested_position_value = max_position_value
+            logger.info(f"Reduced position value to {requested_position_value} USDT")
+        
+        position_value_usdt = requested_position_value
+        
+        logger.info(f"Final position value: {position_value_usdt} USDT (margin required: {position_value_usdt/leverage:.2f} USDT)")
+        
+        # Step 5: Calculate quantity
+        raw_quantity = position_value_usdt / current_price
         
         # Round quantity to appropriate precision
         final_quantity = round(raw_quantity - (raw_quantity % step_size), 8)
         
         logger.info(f"Quantity calculation: {position_value_usdt} USDT / {current_price} = {raw_quantity} -> rounded to {final_quantity}")
         
-        # Step 6: Validate minimum quantity
-        min_qty = float(lot_size_filter['minQty'])
+        # Step 6: Validate and auto-reduce if below minimum
         if final_quantity < min_qty:
-            # Suggest minimum balance needed for this symbol
-            min_position_value = min_qty * current_price
-            min_balance_needed = min_position_value / leverage
-            
-            return {
-                'success': False,
-                'error': f'Calculated quantity {final_quantity} is below minimum {min_qty} for {symbol}. Need at least {min_balance_needed:.2f} USDT available balance (or {min_balance_needed/available_balance*100:.1f}% of current balance) to trade this symbol with {leverage}x leverage.',
-                'details': {
-                    'calculated_quantity': final_quantity,
-                    'minimum_quantity': min_qty,
-                    'minimum_balance_needed': min_balance_needed,
-                    'minimum_balance_percentage': min_balance_needed/available_balance if available_balance > 0 else 1.0,
-                    'position_value_usdt': position_value_usdt,
-                    'current_price': current_price,
-                    'suggestion': f'Increase balance_percentage to at least {min_balance_needed/available_balance:.3f} or use a different symbol with lower minimum quantity'
+            if auto_reduce:
+                # Try to use minimum quantity if we can afford it
+                min_position_value = min_qty * current_price
+                min_margin_required = min_position_value / leverage
+                
+                if min_margin_required <= available_balance:
+                    logger.warning(f"Calculated quantity {final_quantity} below minimum {min_qty}")
+                    logger.info(f"Auto-adjusting to minimum quantity {min_qty}")
+                    final_quantity = min_qty
+                    position_value_usdt = min_position_value
+                else:
+                    return {
+                        'success': False,
+                        'error': f'Insufficient balance to trade {symbol}. Minimum required: {min_margin_required:.2f} USDT, Available: {available_balance:.2f} USDT',
+                        'details': {
+                            'calculated_quantity': final_quantity,
+                            'minimum_quantity': min_qty,
+                            'minimum_margin_required': min_margin_required,
+                            'available_balance': available_balance,
+                            'current_price': current_price,
+                            'suggestion': f'Add at least {min_margin_required - available_balance:.2f} USDT to your account or choose a different symbol'
+                        }
+                    }
+            else:
+                return {
+                    'success': False,
+                    'error': f'Calculated quantity {final_quantity} is below minimum {min_qty} for {symbol}',
+                    'details': {
+                        'calculated_quantity': final_quantity,
+                        'minimum_quantity': min_qty,
+                        'suggestion': 'Increase balance_percentage or enable auto_reduce'
+                    }
                 }
-            }
+        
+        # Step 7: Validate maximum quantity
+        if final_quantity > max_qty:
+            if auto_reduce:
+                logger.warning(f"Calculated quantity {final_quantity} exceeds maximum {max_qty}")
+                logger.info(f"Auto-reducing to maximum quantity {max_qty}")
+                final_quantity = max_qty
+                position_value_usdt = final_quantity * current_price
+            else:
+                return {
+                    'success': False,
+                    'error': f'Calculated quantity {final_quantity} exceeds maximum {max_qty} for {symbol}',
+                    'details': {
+                        'calculated_quantity': final_quantity,
+                        'maximum_quantity': max_qty,
+                        'suggestion': 'Reduce balance_percentage or leverage'
+                    }
+                }
+        
+        # Step 8: Final validation - ensure we have enough margin
+        final_margin_required = (final_quantity * current_price) / leverage
+        if final_margin_required > available_balance * 0.95:  # 95% to leave some buffer
+            if auto_reduce:
+                logger.warning(f"Final margin check: Required {final_margin_required} > Available {available_balance}")
+                # Reduce quantity proportionally
+                reduction_factor = (available_balance * 0.90) / final_margin_required  # Use 90% for extra safety
+                reduced_quantity = final_quantity * reduction_factor
+                final_quantity = round(reduced_quantity - (reduced_quantity % step_size), 8)
+                
+                if final_quantity < min_qty:
+                    final_quantity = min_qty
+                
+                logger.info(f"Final quantity adjusted to {final_quantity} to ensure sufficient margin")
+                position_value_usdt = final_quantity * current_price
+        
+        # Calculate actual balance percentage used
+        actual_balance_pct = ((final_quantity * current_price) / leverage) / available_balance
+        adjustment_made = abs(actual_balance_pct - balance_percentage) > 0.01
         
         return {
             'success': True,
@@ -1405,18 +1496,26 @@ def calculate_position_quantity(symbol, balance_percentage=0.20, leverage=10):
             'details': {
                 'total_balance': total_balance,
                 'available_balance': available_balance,
-                'balance_percentage': balance_percentage,
+                'requested_balance_percentage': balance_percentage,
+                'actual_balance_percentage': actual_balance_pct,
                 'leverage': leverage,
                 'position_value_usdt': position_value_usdt,
+                'margin_required': (final_quantity * current_price) / leverage,
                 'current_price': current_price,
                 'raw_quantity': raw_quantity,
                 'final_quantity': final_quantity,
-                'step_size': step_size
+                'step_size': step_size,
+                'min_quantity': min_qty,
+                'max_quantity': max_qty,
+                'auto_reduced': adjustment_made,
+                'adjustment_reason': 'Position auto-reduced to fit available balance and margin requirements' if adjustment_made else 'No adjustment needed'
             }
         }
         
     except Exception as e:
         logger.error(f"Error calculating position quantity: {str(e)}")
+        import traceback
+        logger.error(traceback.format_exc())
         return {
             'success': False,
             'error': f'Failed to calculate position quantity: {str(e)}',
@@ -2029,6 +2128,219 @@ def state_aware_ma_cross_webhook():
         return jsonify({
             'success': False,
             'error': f'State-aware MA Cross webhook error: {str(e)}'
+        }), 500
+
+@binance_bp.route('/binance/advanced-trading-webhook', methods=['POST'])
+@binance_bp.route('/tradingview/binance/advanced-trading-webhook', methods=['POST'])
+def advanced_trading_webhook():
+    """
+    Advanced trading webhook endpoint with smart position management
+    Supports: buy, sell, and close actions with automatic position sizing
+    
+    JSON Format:
+    {
+        "symbol": "BTCUSDT",
+        "action": "buy" | "sell" | "close",
+        "balance_percentage": 0.25,  // 25% of balance
+        "leverage": 10,
+        "entry": 50000.0
+    }
+    
+    Features:
+    - Automatic margin and quantity calculation for buy/sell
+    - Close specific side (buy closes long, sell closes short)
+    - Close all positions when action=close without side parameter
+    """
+    global binance_client, active_orders
+    
+    if not ensure_binance_client():
+        return jsonify({
+            'success': False,
+            'error': 'Binance client initialization failed. Auto-initialization attempted.'
+        }), 400
+    
+    try:
+        # Parse webhook data with better error handling
+        logger.info(f"Advanced trading webhook called - Content-Type: {request.headers.get('Content-Type', 'Unknown')}")
+        
+        content_type = request.headers.get('Content-Type', '')
+        if 'application/json' in content_type:
+            data = request.get_json()
+        else:
+            raw_data = request.get_data(as_text=True)
+            logger.info(f"Raw webhook data received: {raw_data}")
+            try:
+                import json
+                data = json.loads(raw_data)
+            except json.JSONDecodeError:
+                logger.error(f"Failed to parse webhook data as JSON: {raw_data}")
+                return jsonify({
+                    'success': False,
+                    'error': f'Invalid JSON format in webhook data: {raw_data}'
+                }), 400
+        
+        if not data:
+            logger.error("No webhook data received")
+            return jsonify({
+                'success': False,
+                'error': 'No webhook data received'
+            }), 400
+        
+        logger.info(f"Parsed webhook data: {data}")
+        
+        # Extract and validate parameters
+        try:
+            symbol = str(data.get('symbol', '')).upper()
+            action = str(data.get('action', '')).lower()
+            balance_percentage = float(data.get('balance_percentage', 0.25))
+            leverage = int(data.get('leverage', trading_config['leverage']))
+            entry_price = float(data.get('entry', 0))
+        except (ValueError, TypeError) as param_error:
+            logger.error(f"Error parsing webhook parameters: {param_error}, data: {data}")
+            return jsonify({
+                'success': False,
+                'error': f'Invalid parameter format in webhook data: {str(param_error)}'
+            }), 400
+        
+        # Validate required parameters
+        if not symbol or action not in ['buy', 'sell', 'close']:
+            return jsonify({
+                'success': False,
+                'error': 'Invalid symbol or action. Expected action: "buy", "sell", or "close"'
+            }), 400
+        
+        # Validate balance percentage for buy/sell actions
+        if action in ['buy', 'sell'] and (balance_percentage <= 0 or balance_percentage > 1):
+            return jsonify({
+                'success': False,
+                'error': 'Invalid balance_percentage. Must be between 0.01 (1%) and 1.0 (100%)'
+            }), 400
+        
+        # Ensure symbol format is correct
+        if not symbol.endswith('USDT'):
+            symbol = f"{symbol}USDT"
+        
+        logger.info(f"Advanced trading webhook: {action} {symbol} at {entry_price}")
+        
+        # Handle CLOSE action
+        if action == 'close':
+            return handle_close_position(symbol)
+        
+        # Handle BUY or SELL actions
+        # Step 1: Calculate position quantity based on account balance
+        quantity_result = calculate_position_quantity(symbol, balance_percentage, leverage)
+        if not quantity_result['success']:
+            logger.error(f"Quantity calculation failed for {symbol}: {quantity_result['error']}")
+            logger.error(f"Details: {quantity_result.get('details', {})}")
+            
+            return jsonify({
+                'success': False,
+                'error': f'Failed to calculate position quantity: {quantity_result["error"]}',
+                'details': quantity_result['details'],
+                'webhook_data': data
+            }), 400
+        
+        quantity = quantity_result['quantity']
+        calculation_details = quantity_result['details']
+        
+        logger.info(f"Calculated quantity: {quantity} {symbol} (Position value: {calculation_details['position_value_usdt']} USDT)")
+        
+        # Step 2: Close opposite position first
+        close_result = close_opposite_position(symbol, action)
+        if not close_result['success']:
+            return jsonify({
+                'success': False,
+                'error': f'Failed to close existing position: {close_result["error"]}'
+            }), 400
+        
+        # Step 3: Set leverage for the symbol
+        try:
+            call_binance_api(binance_client.futures_change_leverage, symbol=symbol, leverage=leverage)
+            logger.info(f"Leverage set to {leverage}x for {symbol}")
+        except Exception as lev_error:
+            logger.warning(f"Could not set leverage for {symbol}: {lev_error}")
+        
+        # Step 4: Set margin type
+        try:
+            call_binance_api(binance_client.futures_change_margin_type, symbol=symbol, marginType=trading_config['margin_type'])
+            logger.info(f"Margin type set to {trading_config['margin_type']} for {symbol}")
+        except Exception as margin_error:
+            logger.warning(f"Could not set margin type for {symbol} (may already be set): {margin_error}")
+        
+        # Step 5: Place the main market order (buy or sell)
+        order_side = SIDE_BUY if action == 'buy' else SIDE_SELL
+        main_order = call_binance_api(binance_client.futures_create_order,
+            symbol=symbol,
+            side=order_side,
+            type=ORDER_TYPE_MARKET,
+            quantity=quantity
+        )
+        
+        logger.info(f"Advanced trading {action} order placed: {main_order}")
+        
+        # Get current price for response
+        current_price = call_binance_api(binance_client.futures_symbol_ticker, symbol=symbol)['price']
+        
+        return jsonify({
+            'success': True,
+            'message': f'Advanced trading order executed: {action} {quantity} {symbol}',
+            'trade': {
+                'symbol': symbol,
+                'action': action,
+                'quantity': quantity,
+                'leverage': leverage,
+                'entry_price': entry_price,
+                'current_price': float(current_price),
+                'main_order_id': main_order.get('orderId'),
+                'opposite_position_closed': close_result.get('message', 'No opposite positions'),
+                'mode': 'auto_quantity',
+                'note': 'Quantity auto-calculated based on account balance percentage'
+            },
+            'calculation_details': calculation_details,
+            'timestamp': datetime.now().isoformat()
+        })
+        
+    except BinanceAPIException as e:
+        error_code = getattr(e, 'code', 'Unknown')
+        error_message = getattr(e, 'message', str(e))
+        
+        logger.error(f"Binance API error in advanced trading webhook: Code {error_code} - {error_message}")
+        
+        # Provide specific guidance based on error codes
+        suggestions = []
+        if error_code == -1121:
+            suggestions.append("Check if the symbol exists and is available for futures trading")
+        elif error_code == -1111:
+            suggestions.append("Check quantity precision - use proper decimal places")
+        elif error_code == -2010:
+            suggestions.append("Increase your account balance or reduce position size")
+        elif error_code == -1013:
+            suggestions.append("Adjust balance_percentage - quantity may be too small or too large for this symbol")
+        elif error_code == -4131:
+            suggestions.append("Market price moved too much - retry with current market conditions")
+        
+        return jsonify({
+            'success': False,
+            'error': f'Binance API error (Code {error_code}): {error_message}',
+            'suggestions': suggestions,
+            'webhook_data': data
+        }), 400
+    except BinanceOrderException as e:
+        error_code = getattr(e, 'code', 'Unknown')
+        error_message = getattr(e, 'message', str(e))
+        
+        logger.error(f"Binance order error in advanced trading webhook: Code {error_code} - {error_message}")
+        
+        return jsonify({
+            'success': False,
+            'error': f'Order error (Code {error_code}): {error_message}',
+            'webhook_data': data
+        }), 400
+    except Exception as e:
+        logger.error(f"Error in advanced trading webhook: {str(e)}")
+        return jsonify({
+            'success': False,
+            'error': f'Advanced trading webhook error: {str(e)}'
         }), 500
 
 @binance_bp.route('/binance/smart-webhook', methods=['POST'])

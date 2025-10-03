@@ -8,6 +8,10 @@ rr_ratio = input.float(2.0, "Risk/Reward Ratio", minval=1.0, maxval=5.0)
 use_volume_filter = input.bool(true, "Use Volume Filter")
 trailing_enabled = input.bool(false, "Enable Trailing Stop")
 
+// Webhook Settings
+balance_percentage = input.float(0.25, "Order Quantity (% of equity)", minval=0.01, maxval=1.0, step=0.01, group="Webhook Settings", tooltip="Percentage of balance to use (0.25 = 25%)")
+leverage = input.int(10, "Leverage", minval=1, maxval=125, group="Webhook Settings", tooltip="Leverage multiplier for futures trading")
+
 // Swing High/Low Detection
 swing_high = ta.highest(high, lookback * 2 + 1) == high[lookback]
 swing_low = ta.lowest(low, lookback * 2 + 1) == low[lookback]
@@ -122,11 +126,16 @@ plot(strategy.position_size > 0 ? long_tp : na, "Long TP", color=color.green, st
 plot(strategy.position_size < 0 ? short_sl : na, "Short SL", color=color.red, style=plot.style_linebr)
 plot(strategy.position_size < 0 ? short_tp : na, "Short TP", color=color.green, style=plot.style_linebr)
 
+// JSON Alert Messages for Advanced Trading Webhook
+buy_alert_message = '{"symbol": "' + syminfo.ticker + 'USDT", "action": "buy", "balance_percentage": ' + str.tostring(balance_percentage) + ', "leverage": ' + str.tostring(leverage) + ', "entry": ' + str.tostring(close) + '}'
+
+sell_alert_message = '{"symbol": "' + syminfo.ticker + 'USDT", "action": "sell", "balance_percentage": ' + str.tostring(balance_percentage) + ', "leverage": ' + str.tostring(leverage) + ', "entry": ' + str.tostring(close) + '}'
+
 // Alerts for entries
 if long_entry
-    alert("Long Entry - Price: " + str.tostring(close), alert.freq_once_per_bar)
+    alert(buy_alert_message, alert.freq_once_per_bar)
 if short_entry
-    alert("Short Entry - Price: " + str.tostring(close), alert.freq_once_per_bar)
+    alert(sell_alert_message, alert.freq_once_per_bar)
 
 // Strategy Statistics Table
 var table stats_table = table.new(position.top_right, 2, 5, bgcolor=color.white, border_width=1)

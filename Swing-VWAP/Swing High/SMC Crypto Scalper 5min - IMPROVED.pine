@@ -16,6 +16,10 @@ min_risk_reward = input.float(2.0, "Minimum Risk/Reward Required", minval=1.0, m
 max_risk_percent = input.float(3.0, "Maximum Risk % Allowed", minval=1.0, maxval=10.0)
 use_time_filter = input.bool(true, "Avoid Low Volatility Hours")
 
+// ========== WEBHOOK SETTINGS ==========
+balance_percentage = input.float(0.25, "Order Quantity (% of equity)", minval=0.01, maxval=1.0, step=0.01, group="Webhook Settings", tooltip="Percentage of balance to use (0.25 = 25%)")
+leverage = input.int(10, "Leverage", minval=1, maxval=125, group="Webhook Settings", tooltip="Leverage multiplier for futures trading")
+
 // ========== TREND FILTER ==========
 ema_trend = ta.ema(close, ema_period)
 bullish_trend = close > ema_trend
@@ -97,6 +101,11 @@ bearish_retest = bearish_bos and not na(bearish_retest_zone) and
                  close < bearish_retest_zone and
                  close < open  // Bearish candle
 
+// ========== JSON ALERT MESSAGES FOR WEBHOOK ==========
+buy_alert_message = '{"symbol": "' + syminfo.ticker + 'USDT", "action": "buy", "balance_percentage": ' + str.tostring(balance_percentage) + ', "leverage": ' + str.tostring(leverage) + ', "entry": ' + str.tostring(close) + '}'
+
+sell_alert_message = '{"symbol": "' + syminfo.ticker + 'USDT", "action": "sell", "balance_percentage": ' + str.tostring(balance_percentage) + ', "leverage": ' + str.tostring(leverage) + ', "entry": ' + str.tostring(close) + '}'
+
 // ========== VOLUME FILTER ==========
 volume_avg = ta.sma(volume, 20)
 volume_confirm = volume > volume_avg * 1.2  // Require 20% above average
@@ -161,6 +170,7 @@ if long_entry and strategy.position_size == 0 and not na(long_qty) and not na(lo
         strategy.exit("Long Exit", "Long", stop=long_sl, limit=long_potential_tp, trail_price=close + trail_offset, trail_offset=trail_offset)
     else
         strategy.exit("Long Exit", "Long", stop=long_sl, limit=long_potential_tp)
+    alert(buy_alert_message, alert.freq_once_per_bar_close)
 
 if short_entry and strategy.position_size == 0 and not na(short_qty) and not na(short_sl) and not na(short_potential_tp)
     strategy.entry("Short", strategy.short, qty=short_qty)
@@ -170,6 +180,7 @@ if short_entry and strategy.position_size == 0 and not na(short_qty) and not na(
         strategy.exit("Short Exit", "Short", stop=short_sl, limit=short_potential_tp, trail_price=close - trail_offset, trail_offset=trail_offset)
     else
         strategy.exit("Short Exit", "Short", stop=short_sl, limit=short_potential_tp)
+    alert(sell_alert_message, alert.freq_once_per_bar_close)
 
 // ========== VISUALIZATION ==========
 // EMA Trend

@@ -1,0 +1,848 @@
+// This Pine Script™ code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// Combined Strategy: Swing High/Low (ZigZag) + J lines EMA, VWAP, ML
+// © ChartPrime & jdehorty - Combined and Modified by Pasith
+
+//@version=5
+strategy('Swing High/Low + VWAP + ML Strategy', overlay=true, precision=4, max_labels_count=500)
+
+import jdehorty/MLExtensions/2 as ml
+import jdehorty/KernelFunctions/2 as kernels
+
+// ============================================================================
+// SECTION 1: J LINES EMA, VWAP, ML - RSI BAR COLOR
+// ============================================================================
+
+len = input.int(14, minval=1, title="Length", group="RSI Bar Color")
+rsi = ta.rsi(close, len)
+
+// User-defined bar colors
+colorCond1 = input.color(color.new(#056656, 0), title="Overbought BarColor", group="RSI Bar Color")
+colorCond2 = input.color(color.new(#801922, 0), title="Oversold BarColor", group="RSI Bar Color")
+
+// Bar color conditions
+cond1 = rsi > 60
+barcolor(cond1 ? colorCond1 : na)
+
+cond2 = rsi < 40
+barcolor(cond2 ? colorCond2 : na)
+
+// ============================================================================
+// SECTION 2: J LINES - SESSIONS INDICATOR
+// ============================================================================
+
+// User Inputs
+show_sesNewyork = input(true, 'Your Session', group="Session Settings") 
+sesNewyork_ses = input.session('1300-2200', 'Session Time', group="Session Settings")
+sesNewyork_color = input.color(#C5ACE8, 'Color', group="Session Settings")
+userOpacity = input.int(95, title="Background Opacity", minval=0, maxval=255, group="Session Settings")
+sesNewyork_text = 'Your'
+
+// Timezone input
+userTimezone = input.string('UTC+5:30', title='Select Timezone', options=['UTC-12', 'UTC-11', 'UTC-10', 'UTC-9', 'UTC-8', 'UTC-7', 'UTC-6', 'UTC-5', 'UTC-4', 'UTC-3', 'UTC-2', 'UTC-1', 'UTC+0', 'UTC+1', 'UTC+2', 'UTC+3', 'UTC+4', 'UTC+4:30', 'UTC+5', 'UTC+5:30', 'UTC+5:45', 'UTC+6', 'UTC+6:30', 'UTC+7', 'UTC+8', 'UTC+8:45', 'UTC+9', 'UTC+9:30', 'UTC+10', 'UTC+10:30', 'UTC+11', 'UTC+12', 'UTC+12:45', 'UTC+13', 'UTC+14'], group="Session Settings")
+
+// Session detection based on user timezone
+On_sesNewyork = math.sign(nz(time(timeframe.period, sesNewyork_ses, userTimezone)))
+
+LowHighSessionDetector(On_Session, Color_Session, Text_Session) =>
+    var float Session_Low = na
+    var float Session_High = na
+    var line Line_Session_Low = na
+    var line Line_Session_High = na
+    var box Box_Session = na
+    var label Label_Session = na
+    Session_Low_Detect = On_Session and not On_Session[1]
+    if Session_Low_Detect
+        Session_Low := low
+        Session_High := high
+        Box_Session := box.new(bar_index, Session_High, bar_index, Session_Low, border_color=na, bgcolor=color.new(Color_Session, userOpacity))
+        Line_Session_High := line.new(bar_index, Session_High, bar_index, Session_High, color=Color_Session, width=1)
+        Line_Session_Low := line.new(bar_index, Session_Low, bar_index, Session_Low, color=Color_Session, width=1)
+        Label_Session := label.new(bar_index, Session_High, Text_Session + ' Session', color=Color_Session, textcolor=color.white, style=label.style_label_down, size=size.small)
+    if On_Session and not Session_Low_Detect
+        if low < Session_Low
+            Session_Low := low
+        if high > Session_High
+            Session_High := high
+        box.set_right(Box_Session, bar_index)
+        box.set_top(Box_Session, Session_High)
+        box.set_bottom(Box_Session, Session_Low)
+        line.set_xy2(Line_Session_High, bar_index, Session_High)
+        line.set_xy2(Line_Session_Low, bar_index, Session_Low)
+        line.set_xy1(Line_Session_High, box.get_left(Box_Session), Session_High)
+        line.set_xy1(Line_Session_Low, box.get_left(Box_Session), Session_Low)
+        label.set_xy(Label_Session, math.round((bar_index + box.get_left(Box_Session)) / 2), Session_High)
+
+// Call the function with user input
+if show_sesNewyork
+    LowHighSessionDetector(On_sesNewyork, sesNewyork_color, sesNewyork_text)
+
+// ============================================================================
+// SECTION 3: J LINES - LARGE EMA FILTER
+// ============================================================================
+
+// User input for moving average type
+ma_type = input.string("EMA", title="Select MA Type", options=["SMA", "EMA", "WMA", "SMMA", "HMA", "TMA", "AMA", "LWMA", "EWMA", "VIDYA", "DMA", "EMA Ribbon", "T3"], group="Large MA Filter")
+
+// User input for period
+period = input.int(200, title="Period", minval=1, group="Large MA Filter")
+
+// Function to calculate different moving averages
+sma_val = ta.sma(close, period)
+ema_val = ta.ema(close, period)
+wma_val = ta.wma(close, period)
+smma_val = ta.sma(close, period)
+hma_val = ta.hma(close, period)
+tma_val = ta.sma(ta.sma(close, period), period)
+ama_val = ta.ema(close, period)
+lwma_val = ta.wma(close, period)
+ewma_val = ta.ema(close, period)
+vidya_val = ta.ema(close, period)
+dma_val = close[period]
+ema_ribbon_val = ta.ema(close, period)
+t3_val = ta.ema(ta.ema(ta.ema(close, period), period), period)
+
+// Select the moving average based on user input
+ma = ma_type == "SMA" ? sma_val :
+     ma_type == "EMA" ? ema_val :
+     ma_type == "WMA" ? wma_val :
+     ma_type == "SMMA" ? smma_val :
+     ma_type == "HMA" ? hma_val :
+     ma_type == "TMA" ? tma_val :
+     ma_type == "AMA" ? ama_val :
+     ma_type == "LWMA" ? lwma_val :
+     ma_type == "EWMA" ? ewma_val :
+     ma_type == "VIDYA" ? vidya_val :
+     ma_type == "DMA" ? dma_val :
+     ma_type == "EMA Ribbon" ? ema_ribbon_val :
+     t3_val
+
+// Plot the selected moving average
+plot(ma, title="Moving Average", color=color.white, linewidth=3)
+
+// ============================================================================
+// SECTION 4: J LINES - VWAP CALCULATIONS
+// ============================================================================
+
+// Initialize variables for cumulative volume and volume-price product
+var float sum_volume = 0.0
+var float sum_vp = 0.0
+
+// Reset cumulative sums at the start of a new day
+if (ta.change(time('D')))
+    sum_volume := 0.0
+    sum_vp := 0.0
+
+// Accumulate the volume and volume-price product
+sum_volume := sum_volume + volume
+sum_vp := sum_vp + (close * volume)
+
+// Calculate VWAP
+vwap = sum_vp / sum_volume
+
+// Determine if VWAP should be hidden on 3-hour, 4-hour, daily, weekly, or higher timeframes
+hide_vwap = timeframe.isdaily or timeframe.isweekly or timeframe.ismonthly or timeframe.multiplier >= 180
+
+// Plot VWAP
+plot(vwap, color=hide_vwap ? na : color.rgb(0,0,0, 35), linewidth=2, title="VWAP")
+
+// Set bar color based on price relative to VWAP
+barcolor_condition = close > vwap ? color.new(#7cb781, 0) : color.red
+barcolor(hide_vwap ? na : barcolor_condition)
+
+// Input for EMA length for smoothed VWAP
+ema_length = input.int(10, title="EMA Length for Smoothed VWAP", minval=1, group="VWAP Settings")
+
+// Calculate smoothed VWAP using EMA
+smoothed_vwap = ta.ema(vwap, ema_length)
+
+// Determine color based on the slope of the smoothed VWAP
+vwap_slope_up = ta.change(smoothed_vwap) > 0
+smoothed_vwap_color = vwap_slope_up ? color.rgb(32,117,35) : color.rgb(190,10,10)
+
+// Plot smoothed VWAP
+plot(smoothed_vwap, color=smoothed_vwap_color, linewidth=2, title="Smoothed VWAP (EMA)")
+
+// ============================================================================
+// SECTION 5: J LINES - EMA RIBBONS
+// ============================================================================
+
+// Default EMA lengths
+length1_default = 72
+length2_default = 89
+length3_default = 216
+length4_default = 267
+length5_default = 360
+length6_default = 445
+
+// Adjust EMA lengths based on the timeframe
+adjust_length(length) =>
+    timeframe.isdaily or timeframe.isweekly or timeframe.ismonthly ? math.round(length / 6) : length
+
+length1 = adjust_length(length1_default)
+length2 = adjust_length(length2_default)
+length3 = adjust_length(length3_default)
+length4 = adjust_length(length4_default)
+length5 = adjust_length(length5_default)
+length6 = adjust_length(length6_default)
+
+// User-defined settings for MA type
+ma_type1 = input.string("EMA", title="MA Type 1", options=["SMA", "EMA", "WMA", "HMA", "RMA"], group="EMA Ribbons")
+ma_type2 = input.string("EMA", title="MA Type 2", options=["SMA", "EMA", "WMA", "HMA", "RMA"], group="EMA Ribbons")
+ma_type3 = input.string("EMA", title="MA Type 3", options=["SMA", "EMA", "WMA", "HMA", "RMA"], group="EMA Ribbons")
+ma_type4 = input.string("EMA", title="MA Type 4", options=["SMA", "EMA", "WMA", "HMA", "RMA"], group="EMA Ribbons")
+ma_type5 = input.string("EMA", title="MA Type 5", options=["SMA", "EMA", "WMA", "HMA", "RMA"], group="EMA Ribbons")
+ma_type6 = input.string("EMA", title="MA Type 6", options=["SMA", "EMA", "WMA", "HMA", "RMA"], group="EMA Ribbons")
+
+// Function to calculate the moving average based on type and length
+ma(src, length, type) =>
+    type == "SMA" ? ta.sma(src, length) :
+     type == "EMA" ? ta.ema(src, length) :
+     type == "WMA" ? ta.wma(src, length) :
+     type == "HMA" ? ta.hma(src, length) :
+     ta.rma(src, length)
+
+// Calculate the 6 moving averages
+ma1 = ma(close, length1, ma_type1)
+ma2 = ma(close, length2, ma_type2)
+ma3 = ma(close, length3, ma_type3)
+ma4 = ma(close, length4, ma_type4)
+ma5 = ma(close, length5, ma_type5)
+ma6 = ma(close, length6, ma_type6)
+
+// Plot the 6 moving averages but keep them hidden
+plot1 = plot(ma1, color=color.red, linewidth=2, title="MA 1", display=display.none)
+plot2 = plot(ma2, color=color.orange, linewidth=2, title="MA 2", display=display.none)
+plot3 = plot(ma3, color=color.yellow, linewidth=2, title="MA 3", display=display.none)
+plot4 = plot(ma4, color=color.green, linewidth=2, title="MA 4", display=display.none)
+plot5 = plot(ma5, color=color.blue, linewidth=2, title="MA 5", display=display.none)
+plot6 = plot(ma6, color=color.purple, linewidth=2, title="MA 6", display=display.none)
+
+// Add ribbons between the pairs of EMAs
+fill(plot1=plot1, plot2=plot2, color=color.new(color.red, 65), title="Ribbon 1-2")
+fill(plot1=plot3, plot2=plot4, color=color.new(color.yellow, 65), title="Ribbon 3-4")
+fill(plot1=plot5, plot2=plot6, color=color.new(color.blue, 65), title="Ribbon 5-6")
+
+// ============================================================================
+// SECTION 6: J LINES - ML MODEL TYPES
+// ============================================================================
+
+type Settings
+    float source
+    int neighborsCount
+    int maxBarsBack
+    int featureCount
+    int colorCompression
+    bool showExits
+    bool useDynamicExits
+
+type Label
+    int long
+    int short
+    int neutral
+
+type FeatureArrays
+    array<float> f1
+    array<float> f2
+    array<float> f3
+    array<float> f4
+    array<float> f5
+
+type FeatureSeries
+    float f1
+    float f2
+    float f3
+    float f4
+    float f5
+
+type MLModel
+    int firstBarIndex
+    array<int> trainingLabels
+    int loopSize
+    float lastDistance
+    array<float> distancesArray
+    array<int> predictionsArray
+    int prediction
+
+type FilterSettings 
+    bool useVolatilityFilter
+    bool useRegimeFilter
+    bool useAdxFilter
+    float regimeThreshold
+    int adxThreshold
+
+type Filter
+    bool volatility
+    bool regime
+    bool adx
+
+// ==========================
+// ==== Helper Functions ====
+// ==========================
+
+series_from(feature_string, _close, _high, _low, _hlc3, f_paramA, f_paramB) =>
+    switch feature_string
+        "RSI" => ml.n_rsi(_close, f_paramA, f_paramB)
+        "WT" => ml.n_wt(_hlc3, f_paramA, f_paramB)
+        "CCI" => ml.n_cci(_close, f_paramA, f_paramB)
+        "ADX" => ml.n_adx(_high, _low, _close, f_paramA)
+
+get_lorentzian_distance(int i, int featureCount, FeatureSeries featureSeries, FeatureArrays featureArrays) =>
+    switch featureCount
+        5 => math.log(1+math.abs(featureSeries.f1 - array.get(featureArrays.f1, i))) + math.log(1+math.abs(featureSeries.f2 - array.get(featureArrays.f2, i))) + math.log(1+math.abs(featureSeries.f3 - array.get(featureArrays.f3, i))) + math.log(1+math.abs(featureSeries.f4 - array.get(featureArrays.f4, i))) + math.log(1+math.abs(featureSeries.f5 - array.get(featureArrays.f5, i)))
+        4 => math.log(1+math.abs(featureSeries.f1 - array.get(featureArrays.f1, i))) + math.log(1+math.abs(featureSeries.f2 - array.get(featureArrays.f2, i))) + math.log(1+math.abs(featureSeries.f3 - array.get(featureArrays.f3, i))) + math.log(1+math.abs(featureSeries.f4 - array.get(featureArrays.f4, i)))
+        3 => math.log(1+math.abs(featureSeries.f1 - array.get(featureArrays.f1, i))) + math.log(1+math.abs(featureSeries.f2 - array.get(featureArrays.f2, i))) + math.log(1+math.abs(featureSeries.f3 - array.get(featureArrays.f3, i)))
+        2 => math.log(1+math.abs(featureSeries.f1 - array.get(featureArrays.f1, i))) + math.log(1+math.abs(featureSeries.f2 - array.get(featureArrays.f2, i)))
+
+// ================  
+// ==== Inputs ==== 
+// ================ 
+
+// Settings Object: General User-Defined Inputs
+Settings settings = 
+ Settings.new(
+   close, 
+   input.int(title="Neighbors Count", defval=8, minval=1, maxval=100, step=1, tooltip="Number of neighbors to consider", group="General Settings"),
+   input.int(title="Max Bars Back", defval=2000, tooltip="The maximum number of bars to look back for ML predictions.", group="General Settings"),
+   5,
+   input.int(title="Color Compression", defval=1, minval=1, maxval=10, step=1, tooltip="Compression factor for adjusting the intensity of the color scale.", group="General Settings"),
+   input.bool(title="Show Default Exits", defval=false, tooltip="Default exits occur exactly 4 bars after an entry signal. This corresponds to the predefined length of a trade during the model's training process.", group="General Settings"),
+   input.bool(title="Use Dynamic Exits", defval=false, tooltip="Dynamic exits attempt to let profits ride by dynamically adjusting the exit threshold based on kernel regression logic.", group="General Settings")
+ )
+   
+// Trade Stats Settings
+showTradeStats = input.bool(true, 'Show Trade Stats', tooltip='Displays the trade stats for a given configuration.', group="General Settings")
+useWorstCase = input.bool(false, "Use Worst Case Estimates", tooltip="Whether to use the worst case scenario for backtesting.", group="General Settings")
+
+// Settings object for user-defined settings
+FilterSettings filterSettings =
+ FilterSettings.new(
+     input.bool(title="Use Volatility Filter", defval=true, tooltip="Whether to use the volatility filter.", group="Filters"),
+     input.bool(title="Use Regime Filter", defval=true, group="Filters", inline="regime"),
+     input.bool(title="Use ADX Filter", defval=false, group="Filters", inline="adx"),
+     input.float(title="Threshold", defval=-0.1, minval=-10, maxval=10, step=0.1, tooltip="Whether to use the trend detection filter. Threshold for detecting Trending/Ranging markets.", group="Filters", inline="regime"),
+     input.int(title="Threshold", defval=20, minval=0, maxval=100, step=1, tooltip="Whether to use the ADX filter. Threshold for detecting Trending/Ranging markets.", group="Filters", inline="adx")
+ )
+
+// Filter object for filtering the ML predictions
+Filter filter =
+ Filter.new(
+     ml.filter_volatility(1, 10, filterSettings.useVolatilityFilter),
+     ml.regime_filter(ohlc4, filterSettings.regimeThreshold, filterSettings.useRegimeFilter),
+     ml.filter_adx(settings.source, 14, filterSettings.adxThreshold, filterSettings.useAdxFilter)
+ )
+
+// Feature Variables: User-Defined Inputs for calculating Feature Series. 
+f1_string = input.string(title="Feature 1", options=["RSI", "WT", "CCI", "ADX"], defval="RSI", inline = "01", tooltip="The first feature to use for ML predictions.", group="Feature Engineering")
+f1_paramA = input.int(title="Parameter A", tooltip="The primary parameter of feature 1.", defval=14, inline = "02", group="Feature Engineering")
+f1_paramB = input.int(title="Parameter B", tooltip="The secondary parameter of feature 2 (if applicable).", defval=1, inline = "02", group="Feature Engineering")
+f2_string = input.string(title="Feature 2", options=["RSI", "WT", "CCI", "ADX"], defval="WT", inline = "03", tooltip="The second feature to use for ML predictions.", group="Feature Engineering")
+f2_paramA = input.int(title="Parameter A", tooltip="The primary parameter of feature 2.", defval=10, inline = "04", group="Feature Engineering")
+f2_paramB = input.int(title="Parameter B", tooltip="The secondary parameter of feature 2 (if applicable).", defval=11, inline = "04", group="Feature Engineering")
+f3_string = input.string(title="Feature 3", options=["RSI", "WT", "CCI", "ADX"], defval="CCI", inline = "05", tooltip="The third feature to use for ML predictions.", group="Feature Engineering")
+f3_paramA = input.int(title="Parameter A", tooltip="The primary parameter of feature 3.", defval=20, inline = "06", group="Feature Engineering")
+f3_paramB = input.int(title="Parameter B", tooltip="The secondary parameter of feature 3 (if applicable).", defval=1, inline = "06", group="Feature Engineering")
+f4_string = input.string(title="Feature 4", options=["RSI", "WT", "CCI", "ADX"], defval="ADX", inline = "07", tooltip="The fourth feature to use for ML predictions.", group="Feature Engineering")
+f4_paramA = input.int(title="Parameter A", tooltip="The primary parameter of feature 4.", defval=20, inline = "08", group="Feature Engineering")
+f4_paramB = input.int(title="Parameter B", tooltip="The secondary parameter of feature 4 (if applicable).", defval=2, inline = "08", group="Feature Engineering")
+f5_string = input.string(title="Feature 5", options=["RSI", "WT", "CCI", "ADX"], defval="RSI", inline = "09", tooltip="The fifth feature to use for ML predictions.", group="Feature Engineering")
+f5_paramA = input.int(title="Parameter A", tooltip="The primary parameter of feature 5.", defval=9, inline = "10", group="Feature Engineering")
+f5_paramB = input.int(title="Parameter B", tooltip="The secondary parameter of feature 5 (if applicable).", defval=1, inline = "10", group="Feature Engineering")
+
+// FeatureSeries Object: Calculated Feature Series based on Feature Variables
+featureSeries = 
+ FeatureSeries.new(
+     series_from(f1_string, close, high, low, hlc3, f1_paramA, f1_paramB),
+     series_from(f2_string, close, high, low, hlc3, f2_paramA, f2_paramB),
+     series_from(f3_string, close, high, low, hlc3, f3_paramA, f3_paramB),
+     series_from(f4_string, close, high, low, hlc3, f4_paramA, f4_paramB),
+     series_from(f5_string, close, high, low, hlc3, f5_paramA, f5_paramB)
+ )
+
+// FeatureArrays Variables: Storage of Feature Series as Feature Arrays Optimized for ML
+var f1Array = array.new_float()
+var f2Array = array.new_float()
+var f3Array = array.new_float()
+var f4Array = array.new_float()
+var f5Array = array.new_float()
+array.push(f1Array, featureSeries.f1)
+array.push(f2Array, featureSeries.f2)
+array.push(f3Array, featureSeries.f3)
+array.push(f4Array, featureSeries.f4)
+array.push(f5Array, featureSeries.f5)
+
+// FeatureArrays Object: Storage of the calculated FeatureArrays into a single object
+featureArrays = 
+ FeatureArrays.new(
+     f1Array,
+     f2Array,
+     f3Array,
+     f4Array,
+     f5Array
+ )
+
+// Label Object: Used for classifying historical data as training data for the ML Model
+Label direction = 
+ Label.new(
+     long=1,
+     short=-1,
+     neutral=0
+ )
+
+// Derived from General Settings
+maxBarsBackIndex = last_bar_index >= settings.maxBarsBack ? last_bar_index - settings.maxBarsBack : 0
+
+// EMA Settings 
+useEmaFilter = input.bool(title="Use EMA Filter", defval=false, group="Filters", inline="ema")
+emaPeriod = input.int(title="Period", defval=200, minval=1, step=1, group="Filters", inline="ema", tooltip="The period of the EMA used for the EMA Filter.")
+isEmaUptrend = useEmaFilter ? close > ta.ema(close, emaPeriod) : true
+isEmaDowntrend = useEmaFilter ? close < ta.ema(close, emaPeriod) : true
+useSmaFilter = input.bool(title="Use SMA Filter", defval=false, group="Filters", inline="sma")
+smaPeriod = input.int(title="Period", defval=200, minval=1, step=1, group="Filters", inline="sma", tooltip="The period of the SMA used for the SMA Filter.")
+isSmaUptrend = useSmaFilter ? close > ta.sma(close, smaPeriod) : true
+isSmaDowntrend = useSmaFilter ? close < ta.sma(close, smaPeriod) : true
+
+// Nadaraya-Watson Kernel Regression Settings
+useKernelFilter = input.bool(true, "Trade with Kernel", group="Kernel Settings", inline="kernel")
+showKernelEstimate = input.bool(true, "Show Kernel Estimate", group="Kernel Settings", inline="kernel")
+useKernelSmoothing = input.bool(false, "Enhance Kernel Smoothing", tooltip="Uses a crossover based mechanism to smoothen kernel color changes.", inline='1', group='Kernel Settings')
+h = input.int(8, 'Lookback Window', minval=3, tooltip='The number of bars used for the estimation.', group="Kernel Settings", inline="kernel")
+r = input.float(8., 'Relative Weighting', step=0.25, tooltip='Relative weighting of time frames.', group="Kernel Settings", inline="kernel")
+x = input.int(25, "Regression Level", tooltip='Bar index on which to start regression.', group="Kernel Settings", inline="kernel")
+lag = input.int(2, "Lag", tooltip="Lag for crossover detection.", inline='1', group='Kernel Settings')
+
+// Display Settings
+showBarColors = input.bool(false, "Show Bar Colors", tooltip="Whether to show the bar colors.", group="Display Settings")
+showBarPredictions = input.bool(defval = true, title = "Show Bar Prediction Values", tooltip = "Will show the ML model's evaluation of each bar as an integer.", group="Display Settings")
+useAtrOffset = input.bool(defval = false, title = "Use ATR Offset", tooltip = "Will use the ATR offset instead of the bar prediction offset.", group="Display Settings")
+barPredictionsOffset = input.float(0, "Bar Prediction Offset", minval=0, tooltip="The offset of the bar predictions as a percentage from the bar high or close.", group="Display Settings")
+
+// =================================
+// ==== Next Bar Classification ====
+// =================================
+
+src = settings.source
+y_train_series = src[4] < src[0] ? direction.short : src[4] > src[0] ? direction.long : direction.neutral
+var y_train_array = array.new_int(0)
+
+// Variables used for ML Logic
+var predictions = array.new_float(0)
+var prediction = 0.
+var signal = direction.neutral
+var distances = array.new_float(0)
+
+array.push(y_train_array, y_train_series)
+
+// =========================
+// ====  Core ML Logic  ====
+// =========================
+
+lastDistance = -1.0
+size = math.min(settings.maxBarsBack-1, array.size(y_train_array)-1)
+sizeLoop = math.min(settings.maxBarsBack-1, size)
+
+if bar_index >= maxBarsBackIndex
+    for i = 0 to sizeLoop
+        d = get_lorentzian_distance(i, settings.featureCount, featureSeries, featureArrays)
+        if d >= lastDistance and i % 4 == 0
+            lastDistance := d            
+            array.push(distances, d)
+            array.push(predictions, math.round(array.get(y_train_array, i)))
+            if array.size(predictions) > settings.neighborsCount
+                lastDistance := array.get(distances, math.round(settings.neighborsCount*3/4))
+                array.shift(distances)
+                array.shift(predictions)
+    prediction := array.sum(predictions)
+
+// ============================
+// ==== Prediction Filters ====
+// ============================
+
+filter_all = filter.volatility and filter.regime and filter.adx
+
+// Filtered Signal
+signal := prediction > 0 and filter_all ? direction.long : prediction < 0 and filter_all ? direction.short : nz(signal[1])
+
+// Bar-Count Filters
+var int barsHeld = 0
+barsHeld := ta.change(signal) ? 0 : barsHeld + 1
+isHeldFourBars = barsHeld == 4
+isHeldLessThanFourBars = 0 < barsHeld and barsHeld < 4
+
+// Fractal Filters
+isDifferentSignalType = ta.change(signal)
+isEarlySignalFlip = ta.change(signal) and (ta.change(signal[1]) or ta.change(signal[2]) or ta.change(signal[3]))
+isBuySignal = signal == direction.long and isEmaUptrend and isSmaUptrend
+isSellSignal = signal == direction.short and isEmaDowntrend and isSmaDowntrend
+isLastSignalBuy = signal[4] == direction.long and isEmaUptrend[4] and isSmaUptrend[4]
+isLastSignalSell = signal[4] == direction.short and isEmaDowntrend[4] and isSmaDowntrend[4]
+isNewBuySignal = isBuySignal and isDifferentSignalType
+isNewSellSignal = isSellSignal and isDifferentSignalType
+
+// Kernel Regression Filters
+c_green = color.new(#009988, 20)
+c_red = color.new(#CC3311, 20)
+transparent = color.new(#000000, 100)
+yhat1 = kernels.rationalQuadratic(settings.source, h, r, x)
+yhat2 = kernels.gaussian(settings.source, h-lag, x)
+kernelEstimate = yhat1
+
+// Kernel Rates of Change
+bool wasBearishRate = yhat1[2] > yhat1[1]
+bool wasBullishRate = yhat1[2] < yhat1[1]
+bool isBearishRate = yhat1[1] > yhat1
+bool isBullishRate = yhat1[1] < yhat1
+isBearishChange = isBearishRate and wasBullishRate
+isBullishChange = isBullishRate and wasBearishRate
+
+// Kernel Crossovers
+bool isBullishCrossAlert = ta.crossover(yhat2, yhat1)
+bool isBearishCrossAlert = ta.crossunder(yhat2, yhat1) 
+bool isBullishSmooth = yhat2 >= yhat1
+bool isBearishSmooth = yhat2 <= yhat1
+
+// Kernel Colors
+color colorByCross = isBullishSmooth ? c_green : c_red
+color colorByRate = isBullishRate ? c_green : c_red
+color plotColor = showKernelEstimate ? (useKernelSmoothing ? colorByCross : colorByRate) : transparent
+plot(kernelEstimate, color=plotColor, linewidth=2, title="Kernel Regression Estimate")
+
+// Alert Variables
+bool alertBullish = useKernelSmoothing ? isBullishCrossAlert : isBullishChange
+bool alertBearish = useKernelSmoothing ? isBearishCrossAlert : isBearishChange
+
+// Bullish and Bearish Filters based on Kernel
+isBullish = useKernelFilter ? (useKernelSmoothing ? isBullishSmooth : isBullishRate) : true
+isBearish = useKernelFilter ? (useKernelSmoothing ? isBearishSmooth : isBearishRate) : true
+
+// ===========================
+// ==== Entries and Exits ====
+// ===========================
+
+// Entry Conditions
+startLongTrade = isNewBuySignal and isBullish and isEmaUptrend and isSmaUptrend
+startShortTrade = isNewSellSignal and isBearish and isEmaDowntrend and isSmaDowntrend
+
+// Dynamic Exit Conditions
+lastSignalWasBullish = ta.barssince(startLongTrade) < ta.barssince(startShortTrade)
+lastSignalWasBearish = ta.barssince(startShortTrade) < ta.barssince(startLongTrade)
+barsSinceRedEntry = ta.barssince(startShortTrade)
+barsSinceRedExit = ta.barssince(alertBullish)
+barsSinceGreenEntry = ta.barssince(startLongTrade)
+barsSinceGreenExit = ta.barssince(alertBearish)
+isValidShortExit = barsSinceRedExit > barsSinceRedEntry
+isValidLongExit = barsSinceGreenExit > barsSinceGreenEntry
+endLongTradeDynamic = (isBearishChange and isValidLongExit[1])
+endShortTradeDynamic = (isBullishChange and isValidShortExit[1])
+
+// Fixed Exit Conditions
+endLongTradeStrict = ((isHeldFourBars and isLastSignalBuy) or (isHeldLessThanFourBars and isNewSellSignal and isLastSignalBuy)) and startLongTrade[4]
+endShortTradeStrict = ((isHeldFourBars and isLastSignalSell) or (isHeldLessThanFourBars and isNewBuySignal and isLastSignalSell)) and startShortTrade[4]
+isDynamicExitValid = not useEmaFilter and not useSmaFilter and not useKernelSmoothing
+endLongTrade = settings.useDynamicExits and isDynamicExitValid ? endLongTradeDynamic : endLongTradeStrict 
+endShortTrade = settings.useDynamicExits and isDynamicExitValid ? endShortTradeDynamic : endShortTradeStrict
+
+// =========================
+// ==== Plotting Labels ====
+// =========================
+
+plotshape(startLongTrade ? low : na, 'Buy', shape.labelup, location.belowbar, color=ml.color_green(prediction), size=size.small, offset=0)
+plotshape(startShortTrade ? high : na, 'Sell', shape.labeldown, location.abovebar, ml.color_red(-prediction), size=size.small, offset=0)
+plotshape(endLongTrade and settings.showExits ? high : na, 'StopBuy', shape.xcross, location.absolute, color=#3AFF17, size=size.tiny, offset=0)
+plotshape(endShortTrade and settings.showExits ? low : na, 'StopSell', shape.xcross, location.absolute, color=#FD1707, size=size.tiny, offset=0)
+
+// ============================================================================
+// SECTION 7: SWING HIGH/LOW (ZIGZAG) INDICATOR
+// ============================================================================
+
+var line_h = line(na)
+var line_h1 = line(na)
+
+var line_l = line(na)
+var line_l1 = line(na)
+var line_z = line(na)
+
+var index_h = 0
+var index_l = 0
+var trend = bool(na)
+
+var line_up = line(na)
+var line_dn = line(na)
+var lbl_h = label(na)
+var lbl_l = label(na)
+
+// User Inputs for Swing
+int     swing_len            = input.int(100, "Swing Length", group="Swing High/Low Settings")
+bool    hide_h_l       = input.bool(true, "Levels", inline = "lvl", group="Swing High/Low Settings")
+bool    broken_levels  = input.bool(false, "Broken Levels", inline = "lvl", group="Swing High/Low Settings")
+bool    history_levels = input.bool(false, "History Levels", inline = "lvl", group="Swing High/Low Settings")
+
+bool    shadow         = input.bool(true, "Shadow", inline = "s", group="Swing High/Low Settings")
+int     shadow_width   = input.int(8, "", inline = "s", group="Swing High/Low Settings")
+
+color   upper_col      = input.color(#c424e0, "▽", inline = "cc", group="Swing High/Low Settings")
+color   lower_col      = input.color(#24e075, "△", inline = "cc", group="Swing High/Low Settings")
+
+// Swing Calculations
+float upper = ta.highest(swing_len)
+float lower = ta.lowest(swing_len)
+
+bool upper_trigger = high[1] == upper[1] and high < upper 
+bool lower_trigger = low[1] == lower[1] and low > lower
+
+if upper_trigger
+    index_h := time[1]
+
+if lower_trigger
+    index_l := time[1]
+
+if high == upper 
+    trend := true
+
+if low == lower 
+    trend := false
+
+if not trend and trend[1]
+    line_h := line.new(index_h, upper, time, upper, color = hide_h_l ? upper_col : na, width = 2, xloc = xloc.bar_time)
+    if shadow
+        line_h1 := line.new(index_h
+                             , upper
+                             , line_h.get_x2()
+                             , upper
+                             , color = hide_h_l ? color.new(upper_col, 70) : na
+                             , width = shadow_width
+                             , xloc = xloc.bar_time)
+
+    line_z := line.new(index_l, line_l.get_y1(), line_h.get_x1(), upper, color = lower_col, xloc = xloc.bar_time)
+
+    if not history_levels
+        line.delete(line_h[1])
+        line.delete(line_h1[1])
+
+if trend and not trend[1]
+    line_l := line.new(index_l, lower, time, lower, color = hide_h_l ? lower_col : na, width = 2, xloc = xloc.bar_time)
+    if shadow
+        line_l1 := line.new(index_l
+                             , lower
+                             , time
+                             , lower
+                             , color = hide_h_l ? color.new(lower_col,70) : na
+                             , width = shadow_width
+                             , xloc = xloc.bar_time)
+
+    line_z := line.new(index_h, line_h.get_y1(), line_l.get_x1(), lower, color = upper_col, xloc = xloc.bar_time)
+
+    if not history_levels
+        line.delete(line_l[1])
+        line.delete(line_l1[1])
+
+line_z.set_style(line.style_dashed)
+
+line_l.set_x2(time)
+line_l1.set_x2(time)
+
+line_h.set_x2(time)
+line_h1.set_x2(time)
+
+bool cross_over  = ta.crossover(low, line_h.get_y1())
+bool cross_under = ta.crossunder(high, line_l.get_y1())
+
+if not (trend != trend[1]) and broken_levels
+    if cross_over 
+        line_h.set_style(line.style_dashed)
+        line_h.set_width(1)
+
+    if cross_under and barstate.isconfirmed 
+        line_l.set_style(line.style_dashed)
+        line_l.set_width(1)
+
+if barstate.islast
+    if trend != trend[1]
+        line.delete(line_up)
+        line.delete(line_dn)
+        label.delete(lbl_h)
+        label.delete(lbl_l)
+
+    if not trend != trend[1]
+        if trend
+            line_up := line.new(index_l
+                                 , line_l.get_y1()
+                                 , index_h
+                                 , upper
+                                 , style = line.style_dashed
+                                 , color = lower_col
+                                 , xloc = xloc.bar_time)
+        if not trend 
+            line_dn := line.new(index_h
+                                 , line_h.get_y1()
+                                 , index_l
+                                 , lower
+                                 , style = line.style_dashed
+                                 , color = upper_col
+                                 , xloc = xloc.bar_time)
+
+    if hide_h_l
+        lbl_h := label.new(bar_index
+                             , line_h.get_y1()
+                             , str.tostring(line_h.get_y1()
+                             , "Swing H  (#,###.####)")
+                             , style = label.style_label_left
+                             , color = color.new(upper_col, 50)
+                             , textcolor = chart.fg_color)
+
+        lbl_l := label.new(bar_index
+                             , line_l.get_y1()
+                             , str.tostring(line_l.get_y1()
+                             , "Swing L  (#,###.####)")
+                             , style = label.style_label_left
+                             , color = color.new(lower_col, 50)
+                             , textcolor = chart.fg_color)
+
+    label.delete(lbl_h[1])
+    label.delete(lbl_l[1])
+    line.delete(line_dn[1])
+    line.delete(line_up[1])
+
+    var tbl = table.new(position.top_right, 10, 10)
+    tbl.cell(0,0,"Swing Direction: ", text_color = chart.fg_color)
+    tbl.cell(1,0, (trend ? "⬈" : "⬊"), text_color = trend ? lower_col : upper_col, text_size = size.huge)
+
+if not hide_h_l
+    label.new(line_h.get_x1(), line_h.get_y2(), "", xloc = xloc.bar_time, color = upper_col)
+    label.new(line_l.get_x1(), line_l.get_y2(), "", xloc = xloc.bar_time, style = label.style_label_up, color = lower_col)
+
+// ============================================================================
+// SECTION 8: STRATEGY LOGIC (COMBINING ALL INDICATORS)
+// ============================================================================
+
+// Strategy Settings
+useSwingFilter = input.bool(true, "Use Swing Trend Filter", group="Strategy Settings", tooltip="Only take trades in direction of swing trend")
+useMlSignals = input.bool(true, "Use ML Signals", group="Strategy Settings", tooltip="Use ML model signals for entries")
+useVwapFilter = input.bool(true, "Use VWAP Filter", group="Strategy Settings", tooltip="Filter trades based on VWAP position")
+
+// Binance Webhook Settings - Dynamic Position Sizing
+base_balance_percentage = input.float(0.20, "Base Balance Percentage", minval=0.01, maxval=1.0, step=0.01, group="Strategy Settings", tooltip="Base percentage to use, will be auto-adjusted for minimum requirements")
+leverage = input.int(10, "Leverage", minval=1, maxval=125, group="Strategy Settings")
+
+// Dynamic position sizing based on symbol requirements
+current_price = close
+
+// Symbol-specific minimum quantity and recommended balance mappings
+get_symbol_config() =>
+    switch syminfo.ticker
+        // Major pairs (higher minimum values, need more balance)
+        "BTCUSDT" => [0.001, 0.40]   // [min_qty, recommended_balance_pct]
+        "ETHUSDT" => [0.01, 0.25]
+        "BNBUSDT" => [0.01, 0.20]
+        "LTCUSDT" => [0.001, 0.35]
+        
+        // Mid-cap pairs (moderate requirements)
+        "ADAUSDT" => [1.0, 0.15]
+        "SOLUSDT" => [0.1, 0.20]
+        "DOTUSDT" => [0.1, 0.15]
+        "LINKUSDT" => [0.01, 0.15]
+        "AVAXUSDT" => [0.01, 0.20]
+        "UNIUSDT" => [0.1, 0.15]
+        "ATOMUSDT" => [0.1, 0.15]
+        "FILUSDT" => [0.1, 0.15]
+        "MATICUSDT" => [1.0, 0.10]
+        "ALGOUSDT" => [1.0, 0.10]
+        
+        // Lower-cap pairs (smaller minimum values, lower balance needed)
+        "DOGEUSDT" => [10.0, 0.08]
+        "XRPUSDT" => [1.0, 0.10]
+        "VETUSDT" => [10.0, 0.08]
+        "1INCHUSDT" => [1.0, 0.12]
+        "TRXUSDT" => [10.0, 0.08]
+        "SHIBUSDT" => [1000.0, 0.05]
+        
+        => [0.01, 0.15]  // Default for unknown symbols
+
+get_min_quantity_estimate() =>
+    [min_qty, recommended_balance_pct] = get_symbol_config()
+    min_qty
+
+get_recommended_balance_pct() =>
+    [min_qty, recommended_balance_pct] = get_symbol_config()
+    recommended_balance_pct
+
+// Calculate minimum position value needed
+min_quantity = get_min_quantity_estimate()
+recommended_balance_pct = get_recommended_balance_pct()
+min_position_value_needed = min_quantity * current_price
+
+// Smart adaptive balance percentage calculation
+smart_balance_pct = math.max(base_balance_percentage, recommended_balance_pct)
+
+// Cap at reasonable maximum for safety
+final_balance_percentage = math.min(smart_balance_pct, 0.85)
+
+// Use the final calculated percentage
+quantity = final_balance_percentage
+
+// Strategy Entry Conditions
+// Combine ML signals with Swing trend and VWAP
+longCondition = false
+shortCondition = false
+
+if useMlSignals
+    if useSwingFilter and useVwapFilter
+        longCondition := startLongTrade and trend and close > vwap
+        shortCondition := startShortTrade and not trend and close < vwap
+    else if useSwingFilter
+        longCondition := startLongTrade and trend
+        shortCondition := startShortTrade and not trend
+    else if useVwapFilter
+        longCondition := startLongTrade and close > vwap
+        shortCondition := startShortTrade and close < vwap
+    else
+        longCondition := startLongTrade
+        shortCondition := startShortTrade
+
+// Strategy Exits
+longExitCondition = endLongTrade
+shortExitCondition = endShortTrade
+
+// Calculate optimal balance percentage for webhook
+webhook_balance_percentage = math.max(quantity, 0.10)  // Minimum 10% to handle most symbols
+webhook_balance_percentage := math.min(webhook_balance_percentage, 0.80)  // Maximum 80% for safety
+
+// JSON Alert Messages for Smart Webhook (State-aware MA Cross format)
+buy_alert_message = '{"symbol": "' + syminfo.ticker + '", "action": "buy", "balance_percentage": ' + str.tostring(webhook_balance_percentage) + ', "leverage": ' + str.tostring(leverage) + ', "entry": ' + str.tostring(close) + '}'
+
+sell_alert_message = '{"symbol": "' + syminfo.ticker + '", "action": "sell", "balance_percentage": ' + str.tostring(webhook_balance_percentage) + ', "leverage": ' + str.tostring(leverage) + ', "entry": ' + str.tostring(close) + '}'
+
+close_alert_message = '{"symbol": "' + syminfo.ticker + '", "action": "close", "balance_percentage": ' + str.tostring(webhook_balance_percentage) + ', "leverage": ' + str.tostring(leverage) + ', "entry": ' + str.tostring(close) + '}'
+
+// Execute Strategy Orders
+if longCondition and barstate.isconfirmed
+    strategy.entry("Long", strategy.long)
+    alert(buy_alert_message, alert.freq_once_per_bar)
+
+if shortCondition and barstate.isconfirmed
+    strategy.entry("Short", strategy.short)
+    alert(sell_alert_message, alert.freq_once_per_bar)
+
+if longExitCondition and barstate.isconfirmed
+    strategy.close("Long")
+    alert(close_alert_message, alert.freq_once_per_bar)
+
+if shortExitCondition and barstate.isconfirmed
+    strategy.close("Short")
+    alert(close_alert_message, alert.freq_once_per_bar)
+
+// ================
+// ==== Alerts ====
+// ================ 
+
+// Alert Conditions for Binance Webhook (State-aware MA Cross format)
+alertcondition(longCondition, title="Buy Signal", message="{{strategy.order.action}}")
+alertcondition(shortCondition, title="Sell Signal", message="{{strategy.order.action}}")
+alertcondition(longExitCondition or shortExitCondition, title="Close Signal", message="{{strategy.order.action}}")
+
+// Kernel Estimate Alerts
+alertcondition(condition=alertBullish, title='Kernel Bullish Color Change', message='Kernel Bullish ▲ | {{ticker}}@{{close}} | ({{interval}})')
+alertcondition(condition=alertBearish, title='Kernel Bearish Color Change', message='Kernel Bearish ▼ | {{ticker}}@{{close}} | ({{interval}})')
+
+// Swing Direction Alerts
+alertcondition(trend and not trend[1], title='Swing Uptrend', message='Swing Direction Changed to Uptrend ⬈ | {{ticker}}@{{close}} | ({{interval}})')
+alertcondition(not trend and trend[1], title='Swing Downtrend', message='Swing Direction Changed to Downtrend ⬊ | {{ticker}}@{{close}} | ({{interval}})')
