@@ -10,6 +10,10 @@ import jdehorty/KernelFunctions/2 as kernels
 quantity = input.float(0.20, "Order Quantity (% of equity)", minval=0.01, maxval=1.0, step=0.01, group="Webhook Settings", tooltip="Percentage of balance to use (0.20 = 20%)")
 leverage = input.int(10, "Leverage", minval=1, maxval=125, group="Webhook Settings", tooltip="Leverage multiplier for futures trading")
 
+// Signal Confidence Settings
+min_confidence = input.float(0.5, "Minimum Signal Confidence", minval=0.1, maxval=1.0, step=0.1, group="Webhook Settings", tooltip="Minimum confidence score (0.5 = 50%) required to trigger alert")
+prevent_duplicates = input.bool(true, "Prevent Duplicate Signals", group="Webhook Settings", tooltip="Only send one alert per direction until position is closed")
+
 // Debug and Alert Settings
 show_debug = input.bool(true, "Show Debug Table", group="Debug Settings")
 
@@ -486,8 +490,42 @@ isBearish = useKernelFilter ? (useKernelSmoothing ? isBearishSmooth : isBearishR
 // ============================================================================
 // ENTRIES AND EXITS
 // ============================================================================
-startLongTrade = isNewBuySignal and isBullish and isEmaUptrend and isSmaUptrend
-startShortTrade = isNewSellSignal and isBearish and isEmaDowntrend and isSmaDowntrend
+// Confidence Score Calculation (based on multiple factors)
+float confidenceScore = math.abs(prediction) / settings.neighborsCount
+bool hasHighConfidence = confidenceScore >= min_confidence  // User-defined confidence threshold
+
+// Price momentum confirmation
+priceAboveVwap = close > vwap
+priceBelowVwap = close < vwap
+bool momentumConfirmsLong = priceAboveVwap and vwap_slope_up
+bool momentumConfirmsShort = priceBelowVwap and not vwap_slope_up
+
+// Tracking variables for position state (prevent duplicate alerts)
+var bool inLongPosition = false
+var bool inShortPosition = false
+var bool longAlertSent = false
+var bool shortAlertSent = false
+
+// Base signal conditions with confidence filter
+baseLongSignal = isNewBuySignal and isBullish and isEmaUptrend and isSmaUptrend and hasHighConfidence and momentumConfirmsLong
+baseShortSignal = isNewSellSignal and isBearish and isEmaDowntrend and isSmaDowntrend and hasHighConfidence and momentumConfirmsShort
+
+// Prevent duplicate signals - only trigger if NOT already in position and alert not sent
+startLongTrade = prevent_duplicates ? (baseLongSignal and not inLongPosition and not longAlertSent) : baseLongSignal
+startShortTrade = prevent_duplicates ? (baseShortSignal and not inShortPosition and not shortAlertSent) : baseShortSignal
+
+// Update position tracking
+if startLongTrade
+    inLongPosition := true
+    longAlertSent := true
+    inShortPosition := false
+    shortAlertSent := false
+
+if startShortTrade
+    inShortPosition := true
+    shortAlertSent := true
+    inLongPosition := false
+    longAlertSent := false
 
 lastSignalWasBullish = ta.barssince(startLongTrade) < ta.barssince(startShortTrade)
 lastSignalWasBearish = ta.barssince(startShortTrade) < ta.barssince(startLongTrade)
@@ -505,6 +543,15 @@ endShortTradeStrict = ((isHeldFourBars and isLastSignalSell) or (isHeldLessThanF
 isDynamicExitValid = not useEmaFilter and not useSmaFilter and not useKernelSmoothing
 endLongTrade = settings.useDynamicExits and isDynamicExitValid ? endLongTradeDynamic : endLongTradeStrict 
 endShortTrade = settings.useDynamicExits and isDynamicExitValid ? endShortTradeDynamic : endShortTradeStrict
+
+// Reset position tracking when trades are closed
+if endLongTrade
+    inLongPosition := false
+    longAlertSent := false
+
+if endShortTrade
+    inShortPosition := false
+    shortAlertSent := false
 
 // ============================================================================
 // PLOTTING SIGNALS
@@ -564,3 +611,36 @@ x_val = bar_index
 y_val = useAtrOffset ? prediction > 0 ? high + atrSpaced: low - atrSpaced : prediction > 0 ? high + hl2*barPredictionsOffset/20 : low - hl2*barPredictionsOffset/30
 label.new(x_val, y_val, str.tostring(prediction), xloc.bar_index, yloc.price, color.new(color.white, 100), label.style_label_up, c_label, size.normal, text.align_left)
 barcolor(showBarColors ? color.new(c_pred, 50) : na)
+
+// ============================================================================
+// DEBUG TABLE - Signal Confidence & Position Status
+// ============================================================================
+if show_debug and barstate.islast
+    var table debugTable = table.new(position.top_right, 2, 8, border_width=1)
+    
+    table.cell(debugTable, 0, 0, "Metric", bgcolor=color.new(color.gray, 70), text_color=color.white, text_size=size.small)
+    table.cell(debugTable, 1, 0, "Value", bgcolor=color.new(color.gray, 70), text_color=color.white, text_size=size.small)
+    
+    table.cell(debugTable, 0, 1, "Confidence Score", text_color=color.white, text_size=size.small)
+    confidencePercent = str.tostring(math.round(confidenceScore * 100, 2)) + "%"
+    confidenceColor = hasHighConfidence ? color.green : color.orange
+    table.cell(debugTable, 1, 1, confidencePercent, text_color=confidenceColor, text_size=size.small)
+    
+    table.cell(debugTable, 0, 2, "Min Required", text_color=color.white, text_size=size.small)
+    table.cell(debugTable, 1, 2, str.tostring(math.round(min_confidence * 100)) + "%", text_color=color.white, text_size=size.small)
+    
+    table.cell(debugTable, 0, 3, "Prediction", text_color=color.white, text_size=size.small)
+    predColor = prediction > 0 ? color.green : prediction < 0 ? color.red : color.gray
+    table.cell(debugTable, 1, 3, str.tostring(prediction), text_color=predColor, text_size=size.small)
+    
+    table.cell(debugTable, 0, 4, "In Long Position", text_color=color.white, text_size=size.small)
+    table.cell(debugTable, 1, 4, inLongPosition ? "YES" : "NO", text_color=inLongPosition ? color.green : color.gray, text_size=size.small)
+    
+    table.cell(debugTable, 0, 5, "In Short Position", text_color=color.white, text_size=size.small)
+    table.cell(debugTable, 1, 5, inShortPosition ? "YES" : "NO", text_color=inShortPosition ? color.red : color.gray, text_size=size.small)
+    
+    table.cell(debugTable, 0, 6, "Long Alert Sent", text_color=color.white, text_size=size.small)
+    table.cell(debugTable, 1, 6, longAlertSent ? "YES" : "NO", text_color=longAlertSent ? color.orange : color.gray, text_size=size.small)
+    
+    table.cell(debugTable, 0, 7, "Short Alert Sent", text_color=color.white, text_size=size.small)
+    table.cell(debugTable, 1, 7, shortAlertSent ? "YES" : "NO", text_color=shortAlertSent ? color.orange : color.gray, text_size=size.small)
