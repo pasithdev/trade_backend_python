@@ -14,6 +14,19 @@ leverage = input.int(10, "Leverage", minval=1, maxval=125, group="Webhook Settin
 min_confidence = input.float(0.5, "Minimum Signal Confidence", minval=0.1, maxval=1.0, step=0.1, group="Webhook Settings", tooltip="Minimum confidence score (0.5 = 50%) required to trigger alert")
 prevent_duplicates = input.bool(true, "Prevent Duplicate Signals", group="Webhook Settings", tooltip="Only send one alert per direction until position is closed")
 
+// Smart Entry Settings
+use_smart_entry = input.bool(true, "Use Smart Entry Logic", group="Smart Entry Settings", tooltip="Enable intelligent entry with profit probability analysis")
+min_entry_score = input.float(0.7, "Minimum Entry Score", minval=0.5, maxval=1.0, step=0.05, group="Smart Entry Settings", tooltip="Combined score threshold for entry (0.7 = 70%)")
+require_all_confirmations = input.bool(true, "Require All Confirmations", group="Smart Entry Settings", tooltip="Require ML + Kernel + VWAP + Trend alignment")
+min_bars_between_signals = input.int(3, "Min Bars Between Signals", minval=1, maxval=20, group="Smart Entry Settings", tooltip="Minimum bars required between same-direction signals")
+
+// Smart Exit Settings
+use_smart_exit = input.bool(true, "Use Smart Exit Logic", group="Smart Exit Settings", tooltip="Enable intelligent exit based on profit confidence")
+min_profit_pct = input.float(1.0, "Minimum Profit % for Exit", minval=0.1, maxval=10.0, step=0.1, group="Smart Exit Settings", tooltip="Minimum profit percentage to consider closing")
+exit_confidence = input.float(0.6, "Exit Confidence Threshold", minval=0.1, maxval=1.0, step=0.1, group="Smart Exit Settings", tooltip="Confidence level required for exit signal")
+use_trailing_stop = input.bool(true, "Use Trailing Stop", group="Smart Exit Settings", tooltip="Enable trailing stop when in profit")
+trailing_stop_pct = input.float(0.5, "Trailing Stop %", minval=0.1, maxval=5.0, step=0.1, group="Smart Exit Settings", tooltip="Trailing stop percentage from highest profit")
+
 // Debug and Alert Settings
 show_debug = input.bool(true, "Show Debug Table", group="Debug Settings")
 
@@ -505,27 +518,107 @@ var bool inLongPosition = false
 var bool inShortPosition = false
 var bool longAlertSent = false
 var bool shortAlertSent = false
+var float longEntryPrice = 0.0
+var float shortEntryPrice = 0.0
+var float maxLongProfit = 0.0
+var float maxShortProfit = 0.0
+var int lastLongBar = -999
+var int lastShortBar = -999
+var float entryScore = 0.0
 
-// Base signal conditions with confidence filter
-baseLongSignal = isNewBuySignal and isBullish and isEmaUptrend and isSmaUptrend and hasHighConfidence and momentumConfirmsLong
-baseShortSignal = isNewSellSignal and isBearish and isEmaDowntrend and isSmaDowntrend and hasHighConfidence and momentumConfirmsShort
+// Calculate Smart Entry Score (0-1 scale)
+mlConfidence = confidenceScore
+kernelConfidence = useKernelFilter ? (isBullish ? 1.0 : isBearish ? 1.0 : 0.5) : 1.0
+vwapConfidence = momentumConfirmsLong or momentumConfirmsShort ? 1.0 : 0.5
+trendConfidence = (isEmaUptrend and isSmaUptrend) or (isEmaDowntrend and isSmaDowntrend) ? 1.0 : 0.5
 
-// Prevent duplicate signals - only trigger if NOT already in position and alert not sent
-startLongTrade = prevent_duplicates ? (baseLongSignal and not inLongPosition and not longAlertSent) : baseLongSignal
-startShortTrade = prevent_duplicates ? (baseShortSignal and not inShortPosition and not shortAlertSent) : baseShortSignal
+// Combined entry score (weighted average)
+entryScore := (mlConfidence * 0.4) + (kernelConfidence * 0.3) + (vwapConfidence * 0.2) + (trendConfidence * 0.1)
 
-// Update position tracking
+// All confirmations check
+allConfirmationsLong = hasHighConfidence and isBullish and isEmaUptrend and isSmaUptrend and momentumConfirmsLong
+allConfirmationsShort = hasHighConfidence and isBearish and isEmaDowntrend and isSmaDowntrend and momentumConfirmsShort
+
+// Smart entry conditions
+smartEntryConditionLong = require_all_confirmations ? allConfirmationsLong : entryScore >= min_entry_score
+smartEntryConditionShort = require_all_confirmations ? allConfirmationsShort : entryScore >= min_entry_score
+
+// Minimum bars between signals check
+barsSinceLastLong = bar_index - lastLongBar
+barsSinceLastShort = bar_index - lastShortBar
+canTriggerLong = barsSinceLastLong >= min_bars_between_signals
+canTriggerShort = barsSinceLastShort >= min_bars_between_signals
+
+// Base signal conditions with smart entry filter
+baseLongSignal = isNewBuySignal and (use_smart_entry ? smartEntryConditionLong : (isBullish and isEmaUptrend and isSmaUptrend and hasHighConfidence and momentumConfirmsLong))
+baseShortSignal = isNewSellSignal and (use_smart_entry ? smartEntryConditionShort : (isBearish and isEmaDowntrend and isSmaDowntrend and hasHighConfidence and momentumConfirmsShort))
+
+// Prevent duplicate signals - comprehensive checks
+startLongTrade = prevent_duplicates ? (baseLongSignal and not inLongPosition and not longAlertSent and canTriggerLong) : baseLongSignal
+startShortTrade = prevent_duplicates ? (baseShortSignal and not inShortPosition and not shortAlertSent and canTriggerShort) : baseShortSignal
+
+// Update position tracking with bar index tracking
 if startLongTrade
     inLongPosition := true
     longAlertSent := true
     inShortPosition := false
     shortAlertSent := false
+    longEntryPrice := close
+    maxLongProfit := 0.0
+    lastLongBar := bar_index
+    // Reset short tracking on opposite signal
+    lastShortBar := -999
 
 if startShortTrade
     inShortPosition := true
     shortAlertSent := true
     inLongPosition := false
     longAlertSent := false
+    shortEntryPrice := close
+    maxShortProfit := 0.0
+    lastShortBar := bar_index
+    // Reset long tracking on opposite signal
+    lastLongBar := -999
+
+// Calculate current profit percentage
+currentLongProfit = inLongPosition ? ((close - longEntryPrice) / longEntryPrice) * 100 : 0.0
+currentShortProfit = inShortPosition ? ((shortEntryPrice - close) / shortEntryPrice) * 100 : 0.0
+
+// Track maximum profit achieved
+if inLongPosition
+    maxLongProfit := math.max(maxLongProfit, currentLongProfit)
+
+if inShortPosition
+    maxShortProfit := math.max(maxShortProfit, currentShortProfit)
+
+// Smart exit conditions based on profit confidence
+bool longProfitReached = currentLongProfit >= min_profit_pct
+bool shortProfitReached = currentShortProfit >= min_profit_pct
+
+// Reverse signal confidence for exit
+reverseConfidenceForLong = prediction < 0 and math.abs(prediction) / settings.neighborsCount >= exit_confidence
+reverseConfidenceForShort = prediction > 0 and math.abs(prediction) / settings.neighborsCount >= exit_confidence
+
+// Trailing stop trigger
+bool longTrailingStopHit = use_trailing_stop and maxLongProfit > 0 and currentLongProfit <= (maxLongProfit - trailing_stop_pct)
+bool shortTrailingStopHit = use_trailing_stop and maxShortProfit > 0 and currentShortProfit <= (maxShortProfit - trailing_stop_pct)
+
+// Momentum reversal detection
+bool momentumReversedForLong = not vwap_slope_up and close < vwap
+bool momentumReversedForShort = vwap_slope_up and close > vwap
+
+// Smart exit logic
+smartExitLong = use_smart_exit and inLongPosition and (
+     (longProfitReached and reverseConfidenceForLong) or
+     (longProfitReached and momentumReversedForLong) or
+     longTrailingStopHit or
+     (reverseConfidenceForLong and isBearish))
+
+smartExitShort = use_smart_exit and inShortPosition and (
+     (shortProfitReached and reverseConfidenceForShort) or
+     (shortProfitReached and momentumReversedForShort) or
+     shortTrailingStopHit or
+     (reverseConfidenceForShort and isBullish))
 
 lastSignalWasBullish = ta.barssince(startLongTrade) < ta.barssince(startShortTrade)
 lastSignalWasBearish = ta.barssince(startShortTrade) < ta.barssince(startLongTrade)
@@ -541,17 +634,26 @@ endShortTradeDynamic = (isBullishChange and isValidShortExit[1])
 endLongTradeStrict = ((isHeldFourBars and isLastSignalBuy) or (isHeldLessThanFourBars and isNewSellSignal and isLastSignalBuy)) and startLongTrade[4]
 endShortTradeStrict = ((isHeldFourBars and isLastSignalSell) or (isHeldLessThanFourBars and isNewBuySignal and isLastSignalSell)) and startShortTrade[4]
 isDynamicExitValid = not useEmaFilter and not useSmaFilter and not useKernelSmoothing
-endLongTrade = settings.useDynamicExits and isDynamicExitValid ? endLongTradeDynamic : endLongTradeStrict 
-endShortTrade = settings.useDynamicExits and isDynamicExitValid ? endShortTradeDynamic : endShortTradeStrict
 
-// Reset position tracking when trades are closed
+// Combine smart exits with original exit logic
+endLongTrade = use_smart_exit ? (smartExitLong or (settings.useDynamicExits and isDynamicExitValid ? endLongTradeDynamic : endLongTradeStrict)) : (settings.useDynamicExits and isDynamicExitValid ? endLongTradeDynamic : endLongTradeStrict)
+
+endShortTrade = use_smart_exit ? (smartExitShort or (settings.useDynamicExits and isDynamicExitValid ? endShortTradeDynamic : endShortTradeStrict)) : (settings.useDynamicExits and isDynamicExitValid ? endShortTradeDynamic : endShortTradeStrict)
+
+// Reset position tracking when trades are closed (keep bar tracking for spacing)
 if endLongTrade
     inLongPosition := false
     longAlertSent := false
+    longEntryPrice := 0.0
+    maxLongProfit := 0.0
+    // Keep lastLongBar for minimum spacing enforcement
 
 if endShortTrade
     inShortPosition := false
     shortAlertSent := false
+    shortEntryPrice := 0.0
+    maxShortProfit := 0.0
+    // Keep lastShortBar for minimum spacing enforcement
 
 // ============================================================================
 // PLOTTING SIGNALS
@@ -616,31 +718,63 @@ barcolor(showBarColors ? color.new(c_pred, 50) : na)
 // DEBUG TABLE - Signal Confidence & Position Status
 // ============================================================================
 if show_debug and barstate.islast
-    var table debugTable = table.new(position.top_right, 2, 8, border_width=1)
+    var table debugTable = table.new(position.top_right, 2, 16, border_width=1)
     
     table.cell(debugTable, 0, 0, "Metric", bgcolor=color.new(color.gray, 70), text_color=color.white, text_size=size.small)
     table.cell(debugTable, 1, 0, "Value", bgcolor=color.new(color.gray, 70), text_color=color.white, text_size=size.small)
     
-    table.cell(debugTable, 0, 1, "Confidence Score", text_color=color.white, text_size=size.small)
+    table.cell(debugTable, 0, 1, "Entry Score", text_color=color.white, text_size=size.small)
+    entryScorePercent = str.tostring(math.round(entryScore * 100, 2)) + "%"
+    entryScoreColor = entryScore >= min_entry_score ? color.green : color.orange
+    table.cell(debugTable, 1, 1, entryScorePercent, text_color=entryScoreColor, text_size=size.small)
+    
+    table.cell(debugTable, 0, 2, "ML Confidence", text_color=color.white, text_size=size.small)
     confidencePercent = str.tostring(math.round(confidenceScore * 100, 2)) + "%"
     confidenceColor = hasHighConfidence ? color.green : color.orange
-    table.cell(debugTable, 1, 1, confidencePercent, text_color=confidenceColor, text_size=size.small)
+    table.cell(debugTable, 1, 2, confidencePercent, text_color=confidenceColor, text_size=size.small)
     
-    table.cell(debugTable, 0, 2, "Min Required", text_color=color.white, text_size=size.small)
-    table.cell(debugTable, 1, 2, str.tostring(math.round(min_confidence * 100)) + "%", text_color=color.white, text_size=size.small)
+    table.cell(debugTable, 0, 3, "Min Required", text_color=color.white, text_size=size.small)
+    table.cell(debugTable, 1, 3, str.tostring(math.round(min_confidence * 100)) + "%", text_color=color.white, text_size=size.small)
     
-    table.cell(debugTable, 0, 3, "Prediction", text_color=color.white, text_size=size.small)
+    table.cell(debugTable, 0, 4, "Prediction", text_color=color.white, text_size=size.small)
     predColor = prediction > 0 ? color.green : prediction < 0 ? color.red : color.gray
-    table.cell(debugTable, 1, 3, str.tostring(prediction), text_color=predColor, text_size=size.small)
+    table.cell(debugTable, 1, 4, str.tostring(prediction), text_color=predColor, text_size=size.small)
     
-    table.cell(debugTable, 0, 4, "In Long Position", text_color=color.white, text_size=size.small)
-    table.cell(debugTable, 1, 4, inLongPosition ? "YES" : "NO", text_color=inLongPosition ? color.green : color.gray, text_size=size.small)
+    table.cell(debugTable, 0, 5, "In Long Position", text_color=color.white, text_size=size.small)
+    table.cell(debugTable, 1, 5, inLongPosition ? "YES" : "NO", text_color=inLongPosition ? color.green : color.gray, text_size=size.small)
     
-    table.cell(debugTable, 0, 5, "In Short Position", text_color=color.white, text_size=size.small)
-    table.cell(debugTable, 1, 5, inShortPosition ? "YES" : "NO", text_color=inShortPosition ? color.red : color.gray, text_size=size.small)
+    table.cell(debugTable, 0, 6, "In Short Position", text_color=color.white, text_size=size.small)
+    table.cell(debugTable, 1, 6, inShortPosition ? "YES" : "NO", text_color=inShortPosition ? color.red : color.gray, text_size=size.small)
     
-    table.cell(debugTable, 0, 6, "Long Alert Sent", text_color=color.white, text_size=size.small)
-    table.cell(debugTable, 1, 6, longAlertSent ? "YES" : "NO", text_color=longAlertSent ? color.orange : color.gray, text_size=size.small)
+    table.cell(debugTable, 0, 7, "Bars Since Long", text_color=color.white, text_size=size.small)
+    table.cell(debugTable, 1, 7, str.tostring(barsSinceLastLong), text_color=canTriggerLong ? color.green : color.red, text_size=size.small)
     
-    table.cell(debugTable, 0, 7, "Short Alert Sent", text_color=color.white, text_size=size.small)
-    table.cell(debugTable, 1, 7, shortAlertSent ? "YES" : "NO", text_color=shortAlertSent ? color.orange : color.gray, text_size=size.small)
+    table.cell(debugTable, 0, 8, "Bars Since Short", text_color=color.white, text_size=size.small)
+    table.cell(debugTable, 1, 8, str.tostring(barsSinceLastShort), text_color=canTriggerShort ? color.green : color.red, text_size=size.small)
+    
+    table.cell(debugTable, 0, 9, "Current Long Profit", text_color=color.white, text_size=size.small)
+    longProfitStr = str.tostring(math.round(currentLongProfit, 2)) + "%"
+    longProfitColor = currentLongProfit > 0 ? color.green : currentLongProfit < 0 ? color.red : color.gray
+    table.cell(debugTable, 1, 9, longProfitStr, text_color=longProfitColor, text_size=size.small)
+    
+    table.cell(debugTable, 0, 10, "Max Long Profit", text_color=color.white, text_size=size.small)
+    table.cell(debugTable, 1, 10, str.tostring(math.round(maxLongProfit, 2)) + "%", text_color=color.aqua, text_size=size.small)
+    
+    table.cell(debugTable, 0, 11, "Current Short Profit", text_color=color.white, text_size=size.small)
+    shortProfitStr = str.tostring(math.round(currentShortProfit, 2)) + "%"
+    shortProfitColor = currentShortProfit > 0 ? color.green : currentShortProfit < 0 ? color.red : color.gray
+    table.cell(debugTable, 1, 11, shortProfitStr, text_color=shortProfitColor, text_size=size.small)
+    
+    table.cell(debugTable, 0, 12, "Max Short Profit", text_color=color.white, text_size=size.small)
+    table.cell(debugTable, 1, 12, str.tostring(math.round(maxShortProfit, 2)) + "%", text_color=color.aqua, text_size=size.small)
+    
+    table.cell(debugTable, 0, 13, "Can Trigger Long", text_color=color.white, text_size=size.small)
+    table.cell(debugTable, 1, 13, canTriggerLong and not longAlertSent ? "READY" : "BLOCKED", text_color=canTriggerLong and not longAlertSent ? color.green : color.red, text_size=size.small)
+    
+    table.cell(debugTable, 0, 14, "Can Trigger Short", text_color=color.white, text_size=size.small)
+    table.cell(debugTable, 1, 14, canTriggerShort and not shortAlertSent ? "READY" : "BLOCKED", text_color=canTriggerShort and not shortAlertSent ? color.green : color.red, text_size=size.small)
+    
+    table.cell(debugTable, 0, 15, "Alert Status", text_color=color.white, text_size=size.small)
+    alertStatus = longAlertSent ? "LONG SENT" : shortAlertSent ? "SHORT SENT" : "WAITING"
+    alertStatusColor = longAlertSent ? color.green : shortAlertSent ? color.red : color.gray
+    table.cell(debugTable, 1, 15, alertStatus, text_color=alertStatusColor, text_size=size.small)
