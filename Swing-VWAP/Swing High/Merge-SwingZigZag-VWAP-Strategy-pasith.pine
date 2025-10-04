@@ -1,0 +1,377 @@
+// This Pine Script™ code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// Combined Swing High/Low (ZigZag) and J lines EMA, VWAP, ML Strategy
+// © ChartPrime & pasith
+
+//@version=6
+strategy("Merge Swing ZigZag + VWAP Strategy [pasith]", overlay = true, max_labels_count = 500, precision=4)
+
+// ============================================================================
+// STRATEGY SETTINGS
+// ============================================================================
+quantity = input.float(100, "Balance Percentage", minval=0.01, maxval=100, step=0.01, group="Strategy Settings", tooltip="Percentage of balance to use per trade")
+leverage = input.int(1, "Leverage", minval=1, maxval=125, step=1, group="Strategy Settings", tooltip="Leverage to use for trades")
+
+// ============================================================================
+// SWING HIGH/LOW (ZIGZAG) INDICATOR - ORIGINAL CODE
+// ============================================================================
+var line_h = line(na)
+var line_h1 = line(na)
+
+var line_l = line(na)
+var line_l1 = line(na)
+var line_z = line(na)
+
+var index_h = 0
+var index_l = 0
+var trend = bool(na)
+
+var line_up = line(na)
+var line_dn = line(na)
+var lbl_h = label(na)
+var lbl_l = label(na)
+
+// ZigZag User Inputs
+int     len            = input.int(100, "Swing Length", group="ZigZag Settings")
+bool    hide_h_l       = input.bool(true, "Levels", inline = "lvl", group="ZigZag Settings")
+bool    broken_levels  = input.bool(false, "Broken Levels", inline = "lvl", group="ZigZag Settings")
+bool    history_levels = input.bool(false, "History Levels", inline = "lvl", group="ZigZag Settings")
+
+bool    shadow         = input.bool(true, "Shadow", inline = "s", group="ZigZag Settings")
+int     shadow_width   = input.int(8, "", inline = "s", group="ZigZag Settings")
+
+color   upper_col      = input.color(#c424e0, "▽", inline = "cc", group="ZigZag Settings")
+color   lower_col      = input.color(#24e075, "△", inline = "cc", group="ZigZag Settings")
+
+// ZigZag Calculations
+float upper = ta.highest(len)
+float lower = ta.lowest(len)
+
+bool upper_trigger = high[1] == upper[1] and high < upper 
+bool lower_trigger = low[1] == lower[1] and low > lower
+
+if upper_trigger
+    index_h := time[1]
+
+if lower_trigger
+    index_l := time[1]
+
+if high == upper 
+    trend := true
+
+if low == lower 
+    trend := false
+
+// Variable to track swing changes
+var float prev_swing_high = na
+var float prev_swing_low = na
+var bool swing_high_changed = false
+var bool swing_low_changed = false
+
+if not trend and trend[1]
+    line_h := line.new(index_h, upper, time, upper, color = hide_h_l ? upper_col : na, width = 2, xloc = xloc.bar_time)
+    if shadow
+        line_h1 := line.new(index_h
+                             , upper
+                             , line_h.get_x2()
+                             , upper
+                             , color = hide_h_l ? color.new(upper_col, 70) : na
+                             , width = shadow_width
+                             , xloc = xloc.bar_time)
+
+    line_z := line.new(index_l, line_l.get_y1(), line_h.get_x1(), upper, color = lower_col, xloc = xloc.bar_time)
+
+    // Detect swing high change
+    swing_high_changed := true
+    prev_swing_high := upper
+
+    if not history_levels
+        line.delete(line_h[1])
+        line.delete(line_h1[1])
+else
+    swing_high_changed := false
+
+if trend and not trend[1]
+    line_l := line.new(index_l, lower, time, lower, color = hide_h_l ? lower_col : na, width = 2, xloc = xloc.bar_time)
+    if shadow
+        line_l1 := line.new(index_l
+                             , lower
+                             , time
+                             , lower
+                             , color = hide_h_l ? color.new(lower_col,70) : na
+                             , width = shadow_width
+                             , xloc = xloc.bar_time)
+
+    line_z := line.new(index_h, line_h.get_y1(), line_l.get_x1(), lower, color = upper_col, xloc = xloc.bar_time)
+
+    // Detect swing low change
+    swing_low_changed := true
+    prev_swing_low := lower
+
+    if not history_levels
+        line.delete(line_l[1])
+        line.delete(line_l1[1])
+else
+    swing_low_changed := false
+
+line_z.set_style(line.style_dashed)
+
+line_l.set_x2(time)
+line_l1.set_x2(time)
+
+line_h.set_x2(time)
+line_h1.set_x2(time)
+
+bool cross_over  = ta.crossover(low, line_h.get_y1())
+bool cross_under = ta.crossunder(high, line_l.get_y1())
+
+if not (trend != trend[1]) and broken_levels
+    if cross_over 
+        line_h.set_style(line.style_dashed)
+        line_h.set_width(1)
+
+    if cross_under and barstate.isconfirmed 
+        line_l.set_style(line.style_dashed)
+        line_l.set_width(1)
+
+if barstate.islast
+    if trend != trend[1]
+        line.delete(line_up)
+        line.delete(line_dn)
+        label.delete(lbl_h)
+        label.delete(lbl_l)
+
+    if not trend != trend[1]
+        if trend
+            line_up := line.new(index_l
+                                 , line_l.get_y1()
+                                 , index_h
+                                 , upper
+                                 , style = line.style_dashed
+                                 , color = lower_col
+                                 , xloc = xloc.bar_time)
+        if not trend 
+            line_dn := line.new(index_h
+                                 , line_h.get_y1()
+                                 , index_l
+                                 , lower
+                                 , style = line.style_dashed
+                                 , color = upper_col
+                                 , xloc = xloc.bar_time)
+
+    if hide_h_l
+        lbl_h := label.new(bar_index
+                             , line_h.get_y1()
+                             , str.tostring(line_h.get_y1()
+                             , "Swing H  (#,###.####)")
+                             , style = label.style_label_left
+                             , color = color.new(upper_col, 50)
+                             , textcolor = chart.fg_color)
+
+        lbl_l := label.new(bar_index
+                             , line_l.get_y1()
+                             , str.tostring(line_l.get_y1()
+                             , "Swing L  (#,###.####)")
+                             , style = label.style_label_left
+                             , color = color.new(lower_col, 50)
+                             , textcolor = chart.fg_color)
+
+    label.delete(lbl_h[1])
+    label.delete(lbl_l[1])
+    line.delete(line_dn[1])
+    line.delete(line_up[1])
+
+    var tbl = table.new(position.top_right, 10, 10)
+    tbl.cell(0,0,"Swing Direction: ", text_color = chart.fg_color)
+    tbl.cell(1,0, (trend ? "⬈" : "⬊"), text_color = trend ? lower_col : upper_col, text_size = size.huge)
+
+if not hide_h_l
+    label.new(line_h.get_x1(), line_h.get_y2(), "", xloc = xloc.bar_time, color = upper_col)
+    label.new(line_l.get_x1(), line_l.get_y2(), "", xloc = xloc.bar_time, style = label.style_label_up, color = lower_col)
+
+// ============================================================================
+// J LINES EMA, VWAP, ML INDICATOR - ORIGINAL CODE
+// ============================================================================
+
+// EMA 200 for trend filter
+period_ema200 = input.int(200, title="EMA 200 Period", minval=1, group="EMA Settings")
+ema200 = ta.ema(close, period_ema200)
+plot(ema200, title="EMA 200", color=color.white, linewidth=3)
+
+// VWAP Calculations
+var float sum_volume = 0.0
+var float sum_vp = 0.0
+
+if ta.change(time('D')) != 0
+    sum_volume := 0.0
+    sum_vp := 0.0
+
+sum_volume := sum_volume + volume
+sum_vp := sum_vp + (close * volume)
+
+vwap = sum_vp / sum_volume
+
+hide_vwap = timeframe.isdaily or timeframe.isweekly or timeframe.ismonthly or timeframe.multiplier >= 180
+
+plot(vwap, color=hide_vwap ? na : color.rgb(0,0,0, 35), linewidth=2, title="VWAP")
+
+barcolor_condition = close > vwap ? color.new(#7cb781, 0) : color.red
+barcolor(hide_vwap ? na : barcolor_condition)
+
+// Smoothed VWAP
+ema_length = input.int(10, title="EMA Length for Smoothed VWAP", minval=1, group="VWAP Settings")
+smoothed_vwap = ta.ema(vwap, ema_length)
+
+vwap_slope_up = ta.change(smoothed_vwap) > 0
+smoothed_vwap_color = vwap_slope_up ? color.rgb(32,117,35) : color.rgb(190,10,10)
+
+plot(smoothed_vwap, color=smoothed_vwap_color, linewidth=2, title="Smoothed VWAP (EMA)")
+
+// RSI Bar Colors
+len_rsi = input.int(14, minval=1, title="RSI Length", group="RSI Settings")
+rsi = ta.rsi(close, len_rsi)
+
+colorCond1 = input.color(color.new(#056656, 0), title="Overbought BarColor", group="RSI Settings")
+colorCond2 = input.color(color.new(#801922, 0), title="Oversold BarColor", group="RSI Settings")
+
+cond1 = rsi > 60
+barcolor(cond1 ? colorCond1 : na)
+
+cond2 = rsi < 40
+barcolor(cond2 ? colorCond2 : na)
+
+// EMA Ribbons
+length1_default = 72
+length2_default = 89
+length3_default = 216
+length4_default = 267
+length5_default = 360
+length6_default = 445
+
+adjust_length(length) =>
+    timeframe.isminutes and (timeframe.multiplier == 3 or timeframe.multiplier == 5) ? length / timeframe.multiplier : length
+
+length1 = adjust_length(length1_default)
+length2 = adjust_length(length2_default)
+length3 = adjust_length(length3_default)
+length4 = adjust_length(length4_default)
+length5 = adjust_length(length5_default)
+length6 = adjust_length(length6_default)
+
+ma_type1 = input.string("EMA", title="MA Type 1", options=["SMA", "EMA", "WMA", "HMA", "RMA"], group="MA Ribbon Settings")
+ma_type2 = input.string("EMA", title="MA Type 2", options=["SMA", "EMA", "WMA", "HMA", "RMA"], group="MA Ribbon Settings")
+ma_type3 = input.string("EMA", title="MA Type 3", options=["SMA", "EMA", "WMA", "HMA", "RMA"], group="MA Ribbon Settings")
+ma_type4 = input.string("EMA", title="MA Type 4", options=["SMA", "EMA", "WMA", "HMA", "RMA"], group="MA Ribbon Settings")
+ma_type5 = input.string("EMA", title="MA Type 5", options=["SMA", "EMA", "WMA", "HMA", "RMA"], group="MA Ribbon Settings")
+ma_type6 = input.string("EMA", title="MA Type 6", options=["SMA", "EMA", "WMA", "HMA", "RMA"], group="MA Ribbon Settings")
+
+ma(src, length, type) =>
+    if type == "SMA"
+        ta.sma(src, length)
+    else if type == "EMA"
+        ta.ema(src, length)
+    else if type == "WMA"
+        ta.wma(src, length)
+    else if type == "HMA"
+        ta.hma(src, length)
+    else if type == "RMA"
+        ta.rma(src, length)
+    else
+        na
+
+ma1 = ma(close, length1, ma_type1)
+ma2 = ma(close, length2, ma_type2)
+ma3 = ma(close, length3, ma_type3)
+ma4 = ma(close, length4, ma_type4)
+ma5 = ma(close, length5, ma_type5)
+ma6 = ma(close, length6, ma_type6)
+
+plot1 = plot(ma1, color=color.red, linewidth=2, title="MA 1", display=display.none)
+plot2 = plot(ma2, color=color.orange, linewidth=2, title="MA 2", display=display.none)
+plot3 = plot(ma3, color=color.yellow, linewidth=2, title="MA 3", display=display.none)
+plot4 = plot(ma4, color=color.green, linewidth=2, title="MA 4", display=display.none)
+plot5 = plot(ma5, color=color.blue, linewidth=2, title="MA 5", display=display.none)
+plot6 = plot(ma6, color=color.purple, linewidth=2, title="MA 6", display=display.none)
+
+fill(plot1=plot1, plot2=plot2, color=color.new(color.red, 65), title="Ribbon 1-2")
+fill(plot1=plot3, plot2=plot4, color=color.new(color.yellow, 65), title="Ribbon 3-4")
+fill(plot1=plot5, plot2=plot6, color=color.new(color.blue, 65), title="Ribbon 5-6")
+
+// ============================================================================
+// TRADING STRATEGY LOGIC
+// ============================================================================
+
+// Buy Conditions:
+// 1. Close price above EMA 200
+// 2. Swing low confirmed (swing_low_changed)
+buy_condition_1 = close > ema200
+buy_condition_2 = swing_low_changed
+
+buy_signal = buy_condition_1 and buy_condition_2
+
+// Close Buy Condition:
+// Close price closes below Smoothed VWAP (EMA 10)
+close_buy_condition = ta.crossunder(close, smoothed_vwap)
+
+// Sell Conditions:
+// 1. Close price below EMA 200
+// 2. Swing high confirmed (swing_high_changed)
+sell_condition_1 = close < ema200
+sell_condition_2 = swing_high_changed
+
+sell_signal = sell_condition_1 and sell_condition_2
+
+// Close Sell Condition:
+// Close price closes above Smoothed VWAP (EMA 10)
+close_sell_condition = ta.crossover(close, smoothed_vwap)
+
+// ============================================================================
+// PLOTTING SIGNALS
+// ============================================================================
+plotshape(buy_signal ? low : na, 'Buy', shape.labelup, location.belowbar, color=color.new(color.green, 0), size=size.small, offset=0)
+plotshape(sell_signal ? high : na, 'Sell', shape.labeldown, location.abovebar, color=color.new(color.red, 0), size=size.small, offset=0)
+plotshape(close_buy_condition ? high : na, 'Close Buy', shape.xcross, location.absolute, color=#3AFF17, size=size.tiny, offset=0)
+plotshape(close_sell_condition ? low : na, 'Close Sell', shape.xcross, location.absolute, color=#FD1707, size=size.tiny, offset=0)
+
+// ============================================================================
+// WEBHOOK ALERT MESSAGES (JSON FORMAT)
+// ============================================================================
+buy_alert_message = '{"symbol": "' + syminfo.ticker + '", "action": "buy", "balance_percentage": ' + str.tostring(quantity) + ', "leverage": ' + str.tostring(leverage) + ', "entry": ' + str.tostring(close) + '}'
+
+sell_alert_message = '{"symbol": "' + syminfo.ticker + '", "action": "sell", "balance_percentage": ' + str.tostring(quantity) + ', "leverage": ' + str.tostring(leverage) + ', "entry": ' + str.tostring(close) + '}'
+
+close_buy_alert_message = '{"symbol": "' + syminfo.ticker + '", "action": "close", "balance_percentage": ' + str.tostring(quantity) + ', "leverage": ' + str.tostring(leverage) + ', "entry": ' + str.tostring(close) + '}'
+
+close_sell_alert_message = '{"symbol": "' + syminfo.ticker + '", "action": "close", "balance_percentage": ' + str.tostring(quantity) + ', "leverage": ' + str.tostring(leverage) + ', "entry": ' + str.tostring(close) + '}'
+
+// ============================================================================
+// STRATEGY EXECUTION
+// ============================================================================
+if buy_signal and barstate.isconfirmed
+    strategy.entry("Long", strategy.long)
+    alert(buy_alert_message, alert.freq_once_per_bar)
+
+if sell_signal and barstate.isconfirmed
+    strategy.entry("Short", strategy.short)
+    alert(sell_alert_message, alert.freq_once_per_bar)
+
+if close_buy_condition and barstate.isconfirmed
+    strategy.close("Long")
+    alert(close_buy_alert_message, alert.freq_once_per_bar)
+
+if close_sell_condition and barstate.isconfirmed
+    strategy.close("Short")
+    alert(close_sell_alert_message, alert.freq_once_per_bar)
+
+// ============================================================================
+// ALERT CONDITIONS
+// ============================================================================
+// Plot invisible values for alert message placeholders
+plot(quantity, title="quantity", display=display.none)
+plot(leverage, title="leverage", display=display.none)
+
+alertcondition(buy_signal, title='Buy Signal', message='{"symbol": "{{ticker}}", "action": "buy", "balance_percentage": {{plot("quantity")}}, "leverage": {{plot("leverage")}}, "entry": {{close}}}')
+alertcondition(close_buy_condition, title='Close Buy Signal', message='{"symbol": "{{ticker}}", "action": "close", "balance_percentage": {{plot("quantity")}}, "leverage": {{plot("leverage")}}, "entry": {{close}}}')
+alertcondition(sell_signal, title='Sell Signal', message='{"symbol": "{{ticker}}", "action": "sell", "balance_percentage": {{plot("quantity")}}, "leverage": {{plot("leverage")}}, "entry": {{close}}}')
+alertcondition(close_sell_condition, title='Close Sell Signal', message='{"symbol": "{{ticker}}", "action": "close", "balance_percentage": {{plot("quantity")}}, "leverage": {{plot("leverage")}}, "entry": {{close}}}')
+
+plot(na, editable = false)

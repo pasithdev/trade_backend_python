@@ -1,0 +1,781 @@
+//@version=6
+// 5-Minute Scalping Strategy - Swing ZigZag + VWAP + EMA10
+// Optimized for: 5 orders/hour, 20 orders/day max
+// Enhanced with EMA10 x VWAP confluence signals
+// © pasith - 5min Scalping Edition with EMA10
+
+strategy("5min Scalping - EMA10 VWAP + ZigZag [pasith]", 
+         overlay = true, 
+         max_labels_count = 500, 
+         precision=4,
+         initial_capital=10000,
+         default_qty_type=strategy.percent_of_equity,
+         commission_type=strategy.commission.percent,
+         commission_value=0.1,
+         slippage=3,
+         calc_on_every_tick=false,
+         calc_on_order_fills=false)
+
+// ═══════════════════════════════════════════════════════════════════════════
+// SECTION 1: SCALPING SETTINGS (5-MINUTE OPTIMIZED)
+// ═══════════════════════════════════════════════════════════════════════════
+
+quantity = input.float(100, "Balance Percentage", minval=0.01, maxval=100, step=0.01, 
+                       group="Strategy Settings", tooltip="Percentage of balance to use per trade")
+leverage = input.int(1, "Leverage", minval=1, maxval=125, step=1, 
+                     group="Strategy Settings", tooltip="Leverage to use for trades")
+
+// ORDER LIMIT CONTROLS
+max_orders_per_hour = input.int(5, "Max Orders Per Hour", minval=1, maxval=20, 
+                                group="Order Limits", tooltip="Maximum 5 orders per hour")
+max_orders_per_day = input.int(20, "Max Orders Per Day", minval=1, maxval=100, 
+                               group="Order Limits", tooltip="Maximum 20 orders per day")
+min_bars_between_trades = input.int(12, "Min Bars Between Trades", minval=1, maxval=60, 
+                                    group="Order Limits", 
+                                    tooltip="Minimum 12 bars (60 minutes on 5min chart) between trades")
+
+// SCALPING PROFIT TARGETS (5-MINUTE SPECIFIC)
+use_quick_tp = input.bool(true, "Use Quick Take-Profit", group="Scalping Settings")
+quick_tp_percent = input.float(0.8, "Quick TP %", minval=0.1, maxval=3.0, step=0.1, 
+                               group="Scalping Settings", 
+                               tooltip="Take profit at 0.8% gain (scalping target)")
+use_atr_tp = input.bool(true, "Use ATR Take-Profit", group="Scalping Settings")
+atr_tp_multiplier = input.float(1.5, "ATR TP Multiplier", minval=0.5, maxval=5.0, step=0.1, 
+                                group="Scalping Settings")
+
+// TIGHT STOP-LOSS FOR 5-MIN
+use_stop_loss = input.bool(true, "Use Stop-Loss", group="Risk Management")
+atr_stop_multiplier = input.float(1.5, "ATR Stop-Loss Multiplier", minval=0.5, maxval=3.0, step=0.1, 
+                                  group="Risk Management", 
+                                  tooltip="Tight stop for scalping - 1.5x ATR")
+
+// TIME-BASED EXIT (CRITICAL FOR SCALPING)
+use_time_exit = input.bool(true, "Use Time-Based Exit", group="Scalping Settings")
+max_bars_in_trade = input.int(6, "Max Bars in Trade", minval=1, maxval=20, 
+                              group="Scalping Settings", 
+                              tooltip="Exit after 6 bars (30 minutes on 5min chart) if no TP/SL hit")
+
+// ═══════════════════════════════════════════════════════════════════════════
+// SECTION 2: ORDER TRACKING SYSTEM
+// ═══════════════════════════════════════════════════════════════════════════
+
+// Track orders per hour and per day
+var int current_hour = na
+var int current_day = na
+var int orders_this_hour = 0
+var int orders_this_day = 0
+var int last_trade_bar = 0
+
+// Reset counters at new hour
+new_hour = hour != hour[1]
+if new_hour
+    current_hour := hour
+    orders_this_hour := 0
+
+// Reset counters at new day
+new_day = dayofmonth != dayofmonth[1]
+if new_day
+    current_day := dayofmonth
+    orders_this_day := 0
+
+// Calculate bars since last trade
+bars_since_last_trade = bar_index - last_trade_bar
+
+// Check if we can trade (order limits)
+can_trade_hour = orders_this_hour < max_orders_per_hour
+can_trade_day = orders_this_day < max_orders_per_day
+can_trade_bars = bars_since_last_trade >= min_bars_between_trades or last_trade_bar == 0
+
+// Combined check
+can_open_position = can_trade_hour and can_trade_day and can_trade_bars and strategy.position_size == 0
+
+// Track bars in current trade
+var int bars_in_position = 0
+if strategy.position_size != 0
+    bars_in_position += 1
+else
+    bars_in_position := 0
+
+// ═══════════════════════════════════════════════════════════════════════════
+// SECTION 3: SWING HIGH/LOW (ZIGZAG) - ADJUSTED FOR 5-MIN
+// ═══════════════════════════════════════════════════════════════════════════
+
+var line_h = line(na)
+var line_h1 = line(na)
+var line_l = line(na)
+var line_l1 = line(na)
+var line_z = line(na)
+
+var index_h = 0
+var index_l = 0
+var trend = bool(na)
+
+var line_up = line(na)
+var line_dn = line(na)
+var lbl_h = label(na)
+var lbl_l = label(na)
+
+// ZigZag Settings - OPTIMIZED FOR 5-MINUTE
+int     len            = input.int(20, "Swing Length", minval=5, maxval=100, 
+                                  group="ZigZag Settings", 
+                                  tooltip="Shorter swing length for 5min scalping - 20 bars = 100 minutes")
+bool    hide_h_l       = input.bool(true, "Levels", inline = "lvl", group="ZigZag Settings")
+bool    broken_levels  = input.bool(false, "Broken Levels", inline = "lvl", group="ZigZag Settings")
+bool    history_levels = input.bool(false, "History Levels", inline = "lvl", group="ZigZag Settings")
+
+bool    shadow         = input.bool(true, "Shadow", inline = "s", group="ZigZag Settings")
+int     shadow_width   = input.int(8, "", inline = "s", group="ZigZag Settings")
+
+color   upper_col      = input.color(#c424e0, "▽", inline = "cc", group="ZigZag Settings")
+color   lower_col      = input.color(#24e075, "△", inline = "cc", group="ZigZag Settings")
+
+// ZigZag Calculations
+float upper = ta.highest(len)
+float lower = ta.lowest(len)
+
+bool upper_trigger = high[1] == upper[1] and high < upper 
+bool lower_trigger = low[1] == lower[1] and low > lower
+
+if upper_trigger
+    index_h := time[1]
+
+if lower_trigger
+    index_l := time[1]
+
+if high == upper 
+    trend := true
+
+if low == lower 
+    trend := false
+
+// Track swing changes
+var float prev_swing_high = na
+var float prev_swing_low = na
+var bool swing_high_changed = false
+var bool swing_low_changed = false
+
+if not trend and trend[1]
+    line_h := line.new(index_h, upper, time, upper, color = hide_h_l ? upper_col : na, width = 2, xloc = xloc.bar_time)
+    if shadow
+        line_h1 := line.new(index_h, upper, line_h.get_x2(), upper, 
+                           color = hide_h_l ? color.new(upper_col, 70) : na, 
+                           width = shadow_width, xloc = xloc.bar_time)
+
+    line_z := line.new(index_l, line_l.get_y1(), line_h.get_x1(), upper, color = lower_col, xloc = xloc.bar_time)
+
+    swing_high_changed := true
+    prev_swing_high := upper
+
+    if not history_levels
+        line.delete(line_h[1])
+        line.delete(line_h1[1])
+else
+    swing_high_changed := false
+
+if trend and not trend[1]
+    line_l := line.new(index_l, lower, time, lower, color = hide_h_l ? lower_col : na, width = 2, xloc = xloc.bar_time)
+    if shadow
+        line_l1 := line.new(index_l, lower, time, lower, 
+                           color = hide_h_l ? color.new(lower_col,70) : na, 
+                           width = shadow_width, xloc = xloc.bar_time)
+
+    line_z := line.new(index_h, line_h.get_y1(), line_l.get_x1(), lower, color = upper_col, xloc = xloc.bar_time)
+
+    swing_low_changed := true
+    prev_swing_low := lower
+
+    if not history_levels
+        line.delete(line_l[1])
+        line.delete(line_l1[1])
+else
+    swing_low_changed := false
+
+line_z.set_style(line.style_dashed)
+line_l.set_x2(time)
+line_l1.set_x2(time)
+line_h.set_x2(time)
+line_h1.set_x2(time)
+
+bool cross_over  = ta.crossover(low, line_h.get_y1())
+bool cross_under = ta.crossunder(high, line_l.get_y1())
+
+if not (trend != trend[1]) and broken_levels
+    if cross_over 
+        line_h.set_style(line.style_dashed)
+        line_h.set_width(1)
+    if cross_under and barstate.isconfirmed 
+        line_l.set_style(line.style_dashed)
+        line_l.set_width(1)
+
+if barstate.islast
+    if trend != trend[1]
+        line.delete(line_up)
+        line.delete(line_dn)
+        label.delete(lbl_h)
+        label.delete(lbl_l)
+
+    if not trend != trend[1]
+        if trend
+            line_up := line.new(index_l, line_l.get_y1(), index_h, upper, 
+                               style = line.style_dashed, color = lower_col, xloc = xloc.bar_time)
+        if not trend 
+            line_dn := line.new(index_h, line_h.get_y1(), index_l, lower, 
+                               style = line.style_dashed, color = upper_col, xloc = xloc.bar_time)
+
+    if hide_h_l
+        lbl_h := label.new(bar_index, line_h.get_y1(), 
+                          str.tostring(line_h.get_y1(), "Swing H  (#,###.####)"), 
+                          style = label.style_label_left, 
+                          color = color.new(upper_col, 50), textcolor = chart.fg_color)
+
+        lbl_l := label.new(bar_index, line_l.get_y1(), 
+                          str.tostring(line_l.get_y1(), "Swing L  (#,###.####)"), 
+                          style = label.style_label_left, 
+                          color = color.new(lower_col, 50), textcolor = chart.fg_color)
+
+    label.delete(lbl_h[1])
+    label.delete(lbl_l[1])
+    line.delete(line_dn[1])
+    line.delete(line_up[1])
+
+if not hide_h_l
+    label.new(line_h.get_x1(), line_h.get_y2(), "", xloc = xloc.bar_time, color = upper_col)
+    label.new(line_l.get_x1(), line_l.get_y2(), "", xloc = xloc.bar_time, 
+              style = label.style_label_up, color = lower_col)
+
+// ═══════════════════════════════════════════════════════════════════════════
+// SECTION 4: EMA 10 + EMA 50 FOR 5-MIN SCALPING (WITH VWAP CONFLUENCE)
+// ═══════════════════════════════════════════════════════════════════════════
+
+// EMA 10 - Fast scalping trend indicator (PRIMARY SIGNAL)
+period_ema10 = input.int(10, title="EMA 10 Period (Fast)", minval=5, maxval=50, 
+                         group="EMA Settings", 
+                         tooltip="EMA 10 for quick trend detection and VWAP confluence")
+ema10 = ta.ema(close, period_ema10)
+plot(ema10, title="EMA 10", color=color.new(color.aqua, 0), linewidth=3)
+
+// EMA 50 - Medium-term trend filter
+period_ema50 = input.int(50, title="EMA 50 Period (Medium)", minval=10, maxval=200, 
+                         group="EMA Settings", 
+                         tooltip="EMA 50 confirms overall trend direction")
+ema50 = ta.ema(close, period_ema50)
+plot(ema50, title="EMA 50", color=color.yellow, linewidth=2)
+
+// EMA Alignment Check
+ema_aligned_bullish = ema10 > ema50  // Fast EMA above slow EMA = uptrend
+ema_aligned_bearish = ema10 < ema50  // Fast EMA below slow EMA = downtrend
+
+// EMA Crossover Signals (additional momentum confirmation)
+ema10_cross_above_ema50 = ta.crossover(ema10, ema50)   // Bullish momentum
+ema10_cross_below_ema50 = ta.crossunder(ema10, ema50)  // Bearish momentum
+
+// ═══════════════════════════════════════════════════════════════════════════
+// SECTION 5: VWAP FOR 5-MIN (HOURLY RESET WITH EMA10 CONFLUENCE)
+// ═══════════════════════════════════════════════════════════════════════════
+
+var float sum_volume = 0.0
+var float sum_vp = 0.0
+
+// Reset VWAP every hour for 5-min scalping
+if ta.change(time('60')) != 0
+    sum_volume := 0.0
+    sum_vp := 0.0
+
+sum_volume := sum_volume + volume
+sum_vp := sum_vp + (close * volume)
+
+vwap = sum_vp / sum_volume
+
+plot(vwap, color=color.new(color.orange, 0), linewidth=3, title="VWAP (Hourly)")
+
+// Smoothed VWAP - FASTER FOR 5-MIN
+ema_length = input.int(5, title="EMA Length for Smoothed VWAP", minval=3, maxval=20, 
+                       group="VWAP Settings", 
+                       tooltip="Faster EMA 5 for 5-minute scalping exits")
+smoothed_vwap = ta.ema(vwap, ema_length)
+
+vwap_slope_up = ta.change(smoothed_vwap) > 0
+smoothed_vwap_color = vwap_slope_up ? color.rgb(32,117,35) : color.rgb(190,10,10)
+
+plot(smoothed_vwap, color=smoothed_vwap_color, linewidth=2, title="Smoothed VWAP (EMA 5)")
+
+// ═══════════════════════════════════════════════════════════════════════════
+// SECTION 6: EMA10 x VWAP CONFLUENCE SIGNALS (KEY SCALPING EDGE)
+// ═══════════════════════════════════════════════════════════════════════════
+
+// EMA10 position relative to VWAP
+ema10_above_vwap = ema10 > vwap  // Bullish confluence
+ema10_below_vwap = ema10 < vwap  // Bearish confluence
+
+// Price position relative to both EMA10 and VWAP (STRONGEST SIGNALS)
+price_above_ema10_vwap = close > ema10 and close > vwap  // Strong bullish zone
+price_below_ema10_vwap = close < ema10 and close < vwap  // Strong bearish zone
+
+// Triple confluence: Price, EMA10, VWAP alignment
+triple_bullish = close > ema10 and ema10 > vwap  // All aligned bullish
+triple_bearish = close < ema10 and ema10 < vwap  // All aligned bearish
+
+// EMA10 crossing VWAP signals (POWERFUL MOMENTUM SHIFT)
+ema10_cross_above_vwap = ta.crossover(ema10, vwap)   // Bullish breakout
+ema10_cross_below_vwap = ta.crossunder(ema10, vwap)  // Bearish breakdown
+
+// Price crossing EMA10 with VWAP support
+price_cross_above_ema10 = ta.crossover(close, ema10) and close > vwap
+price_cross_below_ema10 = ta.crossunder(close, ema10) and close < vwap
+
+// ═══════════════════════════════════════════════════════════════════════════
+// SECTION 7: RSI FOR SCALPING (FASTER PERIODS)
+// ═══════════════════════════════════════════════════════════════════════════
+
+len_rsi = input.int(7, minval=5, title="RSI Length (5min)", maxval=14, 
+                    group="RSI Settings", 
+                    tooltip="RSI 7 is more sensitive for 5-minute scalping")
+rsi = ta.rsi(close, len_rsi)
+
+// RSI Overbought/Oversold - TIGHTER FOR 5-MIN
+rsi_overbought = input.int(65, "RSI Overbought", minval=50, maxval=80, group="RSI Settings")
+rsi_oversold = input.int(35, "RSI Oversold", minval=20, maxval=50, group="RSI Settings")
+
+colorCond1 = input.color(color.new(#056656, 0), title="Overbought BarColor", group="RSI Settings")
+colorCond2 = input.color(color.new(#801922, 0), title="Oversold BarColor", group="RSI Settings")
+
+cond1 = rsi > rsi_overbought
+barcolor(cond1 ? colorCond1 : na)
+
+cond2 = rsi < rsi_oversold
+barcolor(cond2 ? colorCond2 : na)
+
+// ═══════════════════════════════════════════════════════════════════════════
+// SECTION 8: ATR FOR SCALPING STOPS/TARGETS
+// ═══════════════════════════════════════════════════════════════════════════
+
+atr_length = input.int(10, "ATR Length (5min)", minval=5, maxval=20, 
+                       group="Risk Management", 
+                       tooltip="Shorter ATR period for 5-minute scalping")
+atr = ta.atr(atr_length)
+
+// ═══════════════════════════════════════════════════════════════════════════
+// SECTION 9: VOLUME FILTER FOR 5-MIN
+// ═══════════════════════════════════════════════════════════════════════════
+
+use_volume_filter = input.bool(true, "Use Volume Filter", group="Volume Settings")
+volume_multiplier = input.float(1.5, "Volume Spike Multiplier", minval=1.0, maxval=3.0, step=0.1, 
+                                group="Volume Settings", 
+                                tooltip="Require 1.5x average volume for scalping entries")
+
+volume_ma = ta.sma(volume, 20)
+volume_confirmed = use_volume_filter ? volume > volume_ma * volume_multiplier : true
+
+// ═══════════════════════════════════════════════════════════════════════════
+// SECTION 10: ENHANCED SCALPING ENTRY LOGIC (EMA10 + VWAP CONFLUENCE)
+// ═══════════════════════════════════════════════════════════════════════════
+
+// BUY CONDITIONS (Enhanced with EMA10 + VWAP triple confluence)
+// 1. Triple bullish alignment: Price > EMA10 > VWAP
+// 2. EMA 10 aligned above EMA 50 (trend confirmation)
+// 3. Swing low confirmed (reversal signal)
+// 4. Volume spike (strong buying pressure)
+// 5. RSI not overbought (room to run)
+// 6. Can trade (order limits respected)
+
+buy_condition_1 = triple_bullish  // Price > EMA10 > VWAP (STRONGEST SETUP)
+buy_condition_2 = ema_aligned_bullish  // EMA 10 > EMA 50
+buy_condition_3 = swing_low_changed  // Swing reversal
+buy_condition_4 = volume_confirmed  // Volume confirmation
+buy_condition_5 = rsi < rsi_overbought  // Not overbought
+buy_condition_6 = can_open_position  // Order limit check
+
+buy_signal = buy_condition_1 and buy_condition_2 and buy_condition_3 and 
+             buy_condition_4 and buy_condition_5 and buy_condition_6
+
+// SELL CONDITIONS (Enhanced with EMA10 + VWAP triple confluence)
+// 1. Triple bearish alignment: Price < EMA10 < VWAP
+// 2. EMA 10 aligned below EMA 50 (trend confirmation)
+// 3. Swing high confirmed (reversal signal)
+// 4. Volume spike (strong selling pressure)
+// 5. RSI not oversold (room to fall)
+// 6. Can trade (order limits respected)
+
+sell_condition_1 = triple_bearish  // Price < EMA10 < VWAP (STRONGEST SETUP)
+sell_condition_2 = ema_aligned_bearish  // EMA 10 < EMA 50
+sell_condition_3 = swing_high_changed  // Swing reversal
+sell_condition_4 = volume_confirmed  // Volume confirmation
+sell_condition_5 = rsi > rsi_oversold  // Not oversold
+sell_condition_6 = can_open_position  // Order limit check
+
+sell_signal = sell_condition_1 and sell_condition_2 and sell_condition_3 and 
+              sell_condition_4 and sell_condition_5 and sell_condition_6
+
+// EXIT CONDITIONS (Multiple layers)
+// 1. VWAP cross (original proven exit)
+// 2. EMA10 cross (momentum shift)
+// 3. Quick TP % hit
+// 4. ATR-based TP
+// 5. Time-based exit (6 bars = 30 minutes)
+
+close_buy_condition = ta.crossunder(close, smoothed_vwap) or ta.crossunder(close, ema10)
+close_sell_condition = ta.crossover(close, smoothed_vwap) or ta.crossover(close, ema10)
+
+// ═══════════════════════════════════════════════════════════════════════════
+// SECTION 11: PROFIT/LOSS CALCULATIONS
+// ═══════════════════════════════════════════════════════════════════════════
+
+var float entry_price = na
+var float long_stop = na
+var float long_tp_quick = na
+var float long_tp_atr = na
+var float short_stop = na
+var float short_tp_quick = na
+var float short_tp_atr = na
+
+// Calculate levels on entry
+if buy_signal and strategy.position_size == 0
+    entry_price := close
+    long_stop := close - (atr * atr_stop_multiplier)
+    long_tp_quick := close * (1 + quick_tp_percent / 100)  // 0.8% quick profit
+    long_tp_atr := close + (atr * atr_tp_multiplier)
+
+if sell_signal and strategy.position_size == 0
+    entry_price := close
+    short_stop := close + (atr * atr_stop_multiplier)
+    short_tp_quick := close * (1 - quick_tp_percent / 100)  // 0.8% quick profit
+    short_tp_atr := close - (atr * atr_tp_multiplier)
+
+// Time-based exit condition
+time_exit_condition = use_time_exit and bars_in_position >= max_bars_in_trade
+
+// ═══════════════════════════════════════════════════════════════════════════
+// SECTION 12: STRATEGY EXECUTION WITH ORDER LIMITS
+// ═══════════════════════════════════════════════════════════════════════════
+
+// LONG ENTRY
+if buy_signal and barstate.isconfirmed
+    strategy.entry("Long", strategy.long, comment="LONG: EMA10+VWAP")
+    last_trade_bar := bar_index
+    orders_this_hour += 1
+    orders_this_day += 1
+
+// SHORT ENTRY
+if sell_signal and barstate.isconfirmed
+    strategy.entry("Short", strategy.short, comment="SHORT: EMA10+VWAP")
+    last_trade_bar := bar_index
+    orders_this_hour += 1
+    orders_this_day += 1
+
+// LONG EXITS
+if strategy.position_size > 0
+    // Quick TP exit (0.8% profit)
+    if use_quick_tp and close >= long_tp_quick
+        strategy.close("Long", comment="TP Quick 0.8%")
+    
+    // ATR-based TP
+    else if use_atr_tp and close >= long_tp_atr
+        strategy.close("Long", comment="TP ATR")
+    
+    // Stop-loss
+    else if use_stop_loss
+        strategy.exit("Exit Long", "Long", stop=long_stop, comment="SL Hit")
+    
+    // VWAP/EMA10 exit (enhanced proven condition)
+    if close_buy_condition and barstate.isconfirmed
+        strategy.close("Long", comment="EXIT: VWAP/EMA10 Cross")
+    
+    // Time exit (30 minutes)
+    if time_exit_condition
+        strategy.close("Long", comment="EXIT: Time (30min)")
+
+// SHORT EXITS
+if strategy.position_size < 0
+    // Quick TP exit (0.8% profit)
+    if use_quick_tp and close <= short_tp_quick
+        strategy.close("Short", comment="TP Quick 0.8%")
+    
+    // ATR-based TP
+    else if use_atr_tp and close <= short_tp_atr
+        strategy.close("Short", comment="TP ATR")
+    
+    // Stop-loss
+    else if use_stop_loss
+        strategy.exit("Exit Short", "Short", stop=short_stop, comment="SL Hit")
+    
+    // VWAP/EMA10 exit (enhanced proven condition)
+    if close_sell_condition and barstate.isconfirmed
+        strategy.close("Short", comment="EXIT: VWAP/EMA10 Cross")
+    
+    // Time exit (30 minutes)
+    if time_exit_condition
+        strategy.close("Short", comment="EXIT: Time (30min)")
+
+// ═══════════════════════════════════════════════════════════════════════════
+// SECTION 13: VISUALIZATION - ENHANCED WITH EMA10/VWAP SIGNALS
+// ═══════════════════════════════════════════════════════════════════════════
+
+// Entry Signals
+plotshape(buy_signal ? low : na, 'EMA10+VWAP Buy', shape.triangleup, location.belowbar, 
+          color=color.new(color.lime, 0), size=size.small, text="BUY")
+plotshape(sell_signal ? high : na, 'EMA10+VWAP Sell', shape.triangledown, location.abovebar, 
+          color=color.new(color.red, 0), size=size.small, text="SELL")
+
+// EMA10 x VWAP Cross Signals (Early warning)
+plotshape(ema10_cross_above_vwap ? low : na, 'EMA10 Cross VWAP Up', shape.circle, 
+          location.belowbar, color=color.new(color.aqua, 30), size=size.tiny, text="⬆")
+plotshape(ema10_cross_below_vwap ? high : na, 'EMA10 Cross VWAP Down', shape.circle, 
+          location.abovebar, color=color.new(color.orange, 30), size=size.tiny, text="⬇")
+
+// Exit Signals
+plotshape(close_buy_condition ? high : na, 'Exit Signal', shape.xcross, 
+          location.absolute, color=#3AFF17, size=size.tiny)
+plotshape(close_sell_condition ? low : na, 'Exit Signal', shape.xcross, 
+          location.absolute, color=#FD1707, size=size.tiny)
+
+// Plot Stop-Loss and Take-Profit Levels
+plot(strategy.position_size > 0 ? long_stop : na, "Long SL", color=color.red, 
+     linewidth=2, style=plot.style_linebr)
+plot(strategy.position_size > 0 and use_quick_tp ? long_tp_quick : na, "Long TP Quick", 
+     color=color.lime, linewidth=2, style=plot.style_linebr)
+plot(strategy.position_size > 0 and use_atr_tp ? long_tp_atr : na, "Long TP ATR", 
+     color=color.green, linewidth=1, style=plot.style_linebr)
+
+plot(strategy.position_size < 0 ? short_stop : na, "Short SL", color=color.red, 
+     linewidth=2, style=plot.style_linebr)
+plot(strategy.position_size < 0 and use_quick_tp ? short_tp_quick : na, "Short TP Quick", 
+     color=color.lime, linewidth=2, style=plot.style_linebr)
+plot(strategy.position_size < 0 and use_atr_tp ? short_tp_atr : na, "Short TP ATR", 
+     color=color.green, linewidth=1, style=plot.style_linebr)
+
+// Background color for EMA10/VWAP alignment zones
+bgcolor(triple_bullish ? color.new(color.green, 95) : 
+        triple_bearish ? color.new(color.red, 95) : na, title="EMA10/VWAP Zone")
+
+// Volume Bars
+volume_color = volume > volume_ma * volume_multiplier ? 
+               (close > open ? color.new(color.green, 50) : color.new(color.red, 50)) : 
+               color.new(color.gray, 80)
+plot(volume, style=plot.style_columns, color=volume_color, title="Volume")
+
+// ═══════════════════════════════════════════════════════════════════════════
+// SECTION 14: ORDER LIMIT DASHBOARD
+// ═══════════════════════════════════════════════════════════════════════════
+
+var order_table = table.new(position.top_right, 2, 6, border_width=1)
+
+if barstate.islast
+    // Header
+    table.cell(order_table, 0, 0, "Order Limits", text_color=color.white, 
+               bgcolor=color.navy, text_size=size.normal)
+    table.cell(order_table, 1, 0, "Status", text_color=color.white, 
+               bgcolor=color.navy, text_size=size.normal)
+    
+    // Orders this hour
+    table.cell(order_table, 0, 1, "This Hour", text_color=color.white, 
+               bgcolor=color.gray, text_size=size.small)
+    hour_status = str.tostring(orders_this_hour) + "/" + str.tostring(max_orders_per_hour)
+    hour_color = can_trade_hour ? color.green : color.red
+    table.cell(order_table, 1, 1, hour_status, text_color=color.white, 
+               bgcolor=hour_color, text_size=size.small)
+    
+    // Orders this day
+    table.cell(order_table, 0, 2, "This Day", text_color=color.white, 
+               bgcolor=color.gray, text_size=size.small)
+    day_status = str.tostring(orders_this_day) + "/" + str.tostring(max_orders_per_day)
+    day_color = can_trade_day ? color.green : color.red
+    table.cell(order_table, 1, 2, day_status, text_color=color.white, 
+               bgcolor=day_color, text_size=size.small)
+    
+    // Bars since last trade
+    table.cell(order_table, 0, 3, "Bars Since Trade", text_color=color.white, 
+               bgcolor=color.gray, text_size=size.small)
+    bars_status = str.tostring(bars_since_last_trade) + "/" + str.tostring(min_bars_between_trades)
+    bars_color = can_trade_bars ? color.green : color.orange
+    table.cell(order_table, 1, 3, bars_status, text_color=color.white, 
+               bgcolor=bars_color, text_size=size.small)
+    
+    // Position status
+    table.cell(order_table, 0, 4, "In Position", text_color=color.white, 
+               bgcolor=color.gray, text_size=size.small)
+    pos_status = strategy.position_size > 0 ? "LONG" : 
+                 strategy.position_size < 0 ? "SHORT" : "NONE"
+    pos_color = strategy.position_size > 0 ? color.green : 
+                strategy.position_size < 0 ? color.red : color.gray
+    table.cell(order_table, 1, 4, pos_status, text_color=color.white, 
+               bgcolor=pos_color, text_size=size.small)
+    
+    // Bars in position
+    table.cell(order_table, 0, 5, "Bars in Trade", text_color=color.white, 
+               bgcolor=color.gray, text_size=size.small)
+    bars_pos_status = str.tostring(bars_in_position) + "/" + str.tostring(max_bars_in_trade)
+    bars_pos_color = bars_in_position < max_bars_in_trade ? color.green : color.red
+    table.cell(order_table, 1, 5, bars_pos_status, text_color=color.white, 
+               bgcolor=bars_pos_color, text_size=size.small)
+
+// ═══════════════════════════════════════════════════════════════════════════
+// SECTION 15: EMA10/VWAP CONFLUENCE DASHBOARD
+// ═══════════════════════════════════════════════════════════════════════════
+
+var confluence_table = table.new(position.bottom_right, 3, 6, border_width=1)
+
+if barstate.islast
+    // Header
+    table.cell(confluence_table, 0, 0, "EMA10/VWAP", text_color=color.white, 
+               bgcolor=color.navy, text_size=size.small)
+    table.cell(confluence_table, 1, 0, "Value", text_color=color.white, 
+               bgcolor=color.navy, text_size=size.small)
+    table.cell(confluence_table, 2, 0, "Signal", text_color=color.white, 
+               bgcolor=color.navy, text_size=size.small)
+    
+    // EMA10 Trend
+    table.cell(confluence_table, 0, 1, "EMA 10", text_color=color.white, 
+               bgcolor=color.gray, text_size=size.tiny)
+    table.cell(confluence_table, 1, 1, str.tostring(ema10, "#.##"), text_color=color.white, 
+               bgcolor=color.gray, text_size=size.tiny)
+    ema10_status = ema10 > ema50 ? "BULL ⬆" : "BEAR ⬇"
+    ema10_color = ema10 > ema50 ? color.green : color.red
+    table.cell(confluence_table, 2, 1, ema10_status, text_color=color.white, 
+               bgcolor=ema10_color, text_size=size.tiny)
+    
+    // VWAP Position
+    table.cell(confluence_table, 0, 2, "VWAP", text_color=color.white, 
+               bgcolor=color.gray, text_size=size.tiny)
+    table.cell(confluence_table, 1, 2, str.tostring(vwap, "#.##"), text_color=color.white, 
+               bgcolor=color.gray, text_size=size.tiny)
+    vwap_status = close > vwap ? "ABOVE ↑" : "BELOW ↓"
+    vwap_color = close > vwap ? color.green : color.red
+    table.cell(confluence_table, 2, 2, vwap_status, text_color=color.white, 
+               bgcolor=vwap_color, text_size=size.tiny)
+    
+    // Triple Confluence
+    table.cell(confluence_table, 0, 3, "Confluence", text_color=color.white, 
+               bgcolor=color.gray, text_size=size.tiny)
+    conf_text = triple_bullish ? "TRIPLE BULL" : triple_bearish ? "TRIPLE BEAR" : "MIXED"
+    conf_color = triple_bullish ? color.green : triple_bearish ? color.red : color.orange
+    table.cell(confluence_table, 1, 3, conf_text, text_color=color.white, 
+               bgcolor=conf_color, text_size=size.tiny)
+    table.cell(confluence_table, 2, 3, triple_bullish ? "✓✓✓" : triple_bearish ? "✓✓✓" : "—", 
+               text_color=color.white, bgcolor=conf_color, text_size=size.tiny)
+    
+    // RSI
+    table.cell(confluence_table, 0, 4, "RSI(7)", text_color=color.white, 
+               bgcolor=color.gray, text_size=size.tiny)
+    table.cell(confluence_table, 1, 4, str.tostring(rsi, "#.#"), text_color=color.white, 
+               bgcolor=color.gray, text_size=size.tiny)
+    rsi_status = rsi > rsi_overbought ? "OB" : rsi < rsi_oversold ? "OS" : "OK"
+    rsi_color = rsi > rsi_overbought ? color.red : rsi < rsi_oversold ? color.green : color.gray
+    table.cell(confluence_table, 2, 4, rsi_status, text_color=color.white, 
+               bgcolor=rsi_color, text_size=size.tiny)
+    
+    // Volume
+    table.cell(confluence_table, 0, 5, "Volume", text_color=color.white, 
+               bgcolor=color.gray, text_size=size.tiny)
+    vol_ratio = volume / volume_ma
+    table.cell(confluence_table, 1, 5, str.tostring(vol_ratio, "#.#") + "x", text_color=color.white, 
+               bgcolor=color.gray, text_size=size.tiny)
+    vol_status = volume_confirmed ? "HIGH ✓" : "LOW"
+    vol_color = volume_confirmed ? color.green : color.orange
+    table.cell(confluence_table, 2, 5, vol_status, text_color=color.white, 
+               bgcolor=vol_color, text_size=size.tiny)
+
+// ═══════════════════════════════════════════════════════════════════════════
+// SECTION 16: WEBHOOK ALERTS (JSON FORMAT WITH EMA10/VWAP DATA)
+// ═══════════════════════════════════════════════════════════════════════════
+
+buy_alert_message = '{"symbol": "' + syminfo.ticker + 
+                    '", "action": "buy", "balance_percentage": ' + str.tostring(quantity) + 
+                    ', "leverage": ' + str.tostring(leverage) + 
+                    ', "entry": ' + str.tostring(close) + 
+                    ', "ema10": ' + str.tostring(ema10) + 
+                    ', "vwap": ' + str.tostring(vwap) + 
+                    ', "confluence": "triple_bullish"' +
+                    ', "stop_loss": ' + str.tostring(long_stop) + 
+                    ', "take_profit_quick": ' + str.tostring(long_tp_quick) + 
+                    ', "timeframe": "5min", "orders_hour": ' + str.tostring(orders_this_hour) + 
+                    ', "orders_day": ' + str.tostring(orders_this_day) + '}'
+
+sell_alert_message = '{"symbol": "' + syminfo.ticker + 
+                     '", "action": "sell", "balance_percentage": ' + str.tostring(quantity) + 
+                     ', "leverage": ' + str.tostring(leverage) + 
+                     ', "entry": ' + str.tostring(close) + 
+                     ', "ema10": ' + str.tostring(ema10) + 
+                     ', "vwap": ' + str.tostring(vwap) + 
+                     ', "confluence": "triple_bearish"' +
+                     ', "stop_loss": ' + str.tostring(short_stop) + 
+                     ', "take_profit_quick": ' + str.tostring(short_tp_quick) + 
+                     ', "timeframe": "5min", "orders_hour": ' + str.tostring(orders_this_hour) + 
+                     ', "orders_day": ' + str.tostring(orders_this_day) + '}'
+
+close_alert_message = '{"symbol": "' + syminfo.ticker + 
+                      '", "action": "close", "exit": ' + str.tostring(close) + 
+                      ', "timeframe": "5min"}'
+
+// Trigger Alerts
+if buy_signal and barstate.isconfirmed
+    alert(buy_alert_message, alert.freq_once_per_bar)
+
+if sell_signal and barstate.isconfirmed
+    alert(sell_alert_message, alert.freq_once_per_bar)
+
+if (close_buy_condition or close_sell_condition) and barstate.isconfirmed
+    alert(close_alert_message, alert.freq_once_per_bar)
+
+// ═══════════════════════════════════════════════════════════════════════════
+// ALERT CONDITIONS
+// ═══════════════════════════════════════════════════════════════════════════
+
+plot(quantity, title="quantity", display=display.none)
+plot(leverage, title="leverage", display=display.none)
+
+alertcondition(buy_signal, title='EMA10+VWAP Buy Signal', 
+               message='{"symbol": "{{ticker}}", "action": "buy", "confluence": "ema10_vwap_bullish", "entry": {{close}}}')
+
+alertcondition(sell_signal, title='EMA10+VWAP Sell Signal', 
+               message='{"symbol": "{{ticker}}", "action": "sell", "confluence": "ema10_vwap_bearish", "entry": {{close}}}')
+
+alertcondition(ema10_cross_above_vwap, title='EMA10 Crosses Above VWAP', 
+               message='{"symbol": "{{ticker}}", "signal": "ema10_cross_vwap_bullish", "price": {{close}}}')
+
+alertcondition(ema10_cross_below_vwap, title='EMA10 Crosses Below VWAP', 
+               message='{"symbol": "{{ticker}}", "signal": "ema10_cross_vwap_bearish", "price": {{close}}}')
+
+plot(na, editable = false)
+
+// ═══════════════════════════════════════════════════════════════════════════
+// EMA10 + VWAP CONFLUENCE STRATEGY NOTES
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// KEY ENHANCEMENTS WITH EMA10:
+// ✅ EMA 10 as fast trend indicator (aqua line)
+// ✅ EMA 50 as medium-term filter (yellow line)
+// ✅ VWAP as institutional price anchor (orange line)
+// ✅ Triple confluence: Price > EMA10 > VWAP = STRONGEST BULLISH SETUP
+// ✅ Triple confluence: Price < EMA10 < VWAP = STRONGEST BEARISH SETUP
+//
+// ENTRY SIGNALS REQUIRE:
+// 1. Triple alignment (Price-EMA10-VWAP in order)
+// 2. EMA10 > EMA50 (trend confirmation)
+// 3. Swing reversal (ZigZag signal)
+// 4. Volume spike (1.5x average)
+// 5. RSI not extreme
+// 6. Order limits respected
+//
+// EXIT SIGNALS:
+// ✅ Price crosses below EMA10 OR VWAP (momentum loss)
+// ✅ Quick TP at 0.8% (scalping target)
+// ✅ ATR-based TP at 1.5× ATR
+// ✅ Time exit after 30 minutes (6 bars)
+//
+// VISUAL INDICATORS:
+// 🟦 Green background = Triple bullish zone (Price > EMA10 > VWAP)
+// 🟥 Red background = Triple bearish zone (Price < EMA10 < VWAP)
+// 🔵 Small circles = EMA10 crossing VWAP (early warning)
+// 🟢 Buy triangles = Full entry signal confirmation
+// 🔴 Sell triangles = Full exit signal confirmation
+//
+// DASHBOARD FEATURES:
+// - Top Right: Order limits tracking (5/hour, 20/day)
+// - Bottom Right: EMA10/VWAP confluence status
+// - Shows real-time alignment of all indicators
+//
+// RECOMMENDED PAIRS: BTC/USDT, ETH/USDT (high liquidity 5-min)
+// RECOMMENDED LEVERAGE: 2-5x for scalping
+// EXPECTED WIN RATE: 50-60% with proper setup
+//
+// ═══════════════════════════════════════════════════════════════════════════

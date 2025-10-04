@@ -1,0 +1,654 @@
+//@version=6
+// Enhanced Profitable Swing ZigZag + VWAP Strategy with Advanced Risk Management
+// Based on proven profitable conditions from original strategy
+// © pasith - Enhanced Edition
+
+strategy("Enhanced Profitable Swing ZigZag + VWAP Strategy [pasith]", 
+         overlay = true, 
+         max_labels_count = 500, 
+         precision=4,
+         initial_capital=10000,
+         default_qty_type=strategy.percent_of_equity,
+         commission_type=strategy.commission.percent,
+         commission_value=0.1,
+         slippage=3)
+
+// ═══════════════════════════════════════════════════════════════════════════
+// SECTION 1: STRATEGY SETTINGS (From Original + Enhancements)
+// ═══════════════════════════════════════════════════════════════════════════
+
+quantity = input.float(100, "Balance Percentage", minval=0.01, maxval=100, step=0.01, 
+                       group="Strategy Settings", tooltip="Percentage of balance to use per trade")
+leverage = input.int(1, "Leverage", minval=1, maxval=125, step=1, 
+                     group="Strategy Settings", tooltip="Leverage to use for trades")
+
+// NEW: Enhanced Risk Management
+use_stop_loss = input.bool(true, "Use Stop-Loss", group="Risk Management")
+atr_stop_multiplier = input.float(2.0, "ATR Stop-Loss Multiplier", minval=0.5, maxval=5.0, step=0.1, 
+                                  group="Risk Management", tooltip="Stop-loss distance in ATR multiples")
+use_take_profit = input.bool(true, "Use Take-Profit", group="Risk Management")
+risk_reward_ratio = input.float(2.5, "Risk:Reward Ratio", minval=1.0, maxval=10.0, step=0.5, 
+                                group="Risk Management", tooltip="Take-profit based on risk-reward ratio")
+use_trailing_stop = input.bool(true, "Use Trailing Stop", group="Risk Management")
+trailing_atr_mult = input.float(2.5, "Trailing ATR Multiplier", minval=1.0, maxval=5.0, step=0.5, 
+                                group="Risk Management")
+
+// NEW: Volume Confirmation
+use_volume_filter = input.bool(true, "Use Volume Confirmation", group="Volume Settings")
+volume_multiplier = input.float(1.2, "Volume Spike Multiplier", minval=1.0, maxval=3.0, step=0.1, 
+                                group="Volume Settings", tooltip="Volume must exceed average by this multiple")
+
+// NEW: Momentum Filter
+use_momentum_filter = input.bool(true, "Use Momentum Filter", group="Momentum Settings")
+momentum_length = input.int(14, "Momentum Length", minval=5, maxval=50, group="Momentum Settings")
+momentum_threshold = input.float(0.5, "Momentum Threshold %", minval=0.1, maxval=5.0, step=0.1, 
+                                 group="Momentum Settings")
+
+// ═══════════════════════════════════════════════════════════════════════════
+// SECTION 2: SWING HIGH/LOW (ZIGZAG) - ORIGINAL PROVEN LOGIC
+// ═══════════════════════════════════════════════════════════════════════════
+
+var line_h = line(na)
+var line_h1 = line(na)
+var line_l = line(na)
+var line_l1 = line(na)
+var line_z = line(na)
+
+var index_h = 0
+var index_l = 0
+var trend = bool(na)
+
+var line_up = line(na)
+var line_dn = line(na)
+var lbl_h = label(na)
+var lbl_l = label(na)
+
+// ZigZag User Inputs
+int     len            = input.int(100, "Swing Length", group="ZigZag Settings")
+bool    hide_h_l       = input.bool(true, "Levels", inline = "lvl", group="ZigZag Settings")
+bool    broken_levels  = input.bool(false, "Broken Levels", inline = "lvl", group="ZigZag Settings")
+bool    history_levels = input.bool(false, "History Levels", inline = "lvl", group="ZigZag Settings")
+
+bool    shadow         = input.bool(true, "Shadow", inline = "s", group="ZigZag Settings")
+int     shadow_width   = input.int(8, "", inline = "s", group="ZigZag Settings")
+
+color   upper_col      = input.color(#c424e0, "▽", inline = "cc", group="ZigZag Settings")
+color   lower_col      = input.color(#24e075, "△", inline = "cc", group="ZigZag Settings")
+
+// ZigZag Calculations
+float upper = ta.highest(len)
+float lower = ta.lowest(len)
+
+bool upper_trigger = high[1] == upper[1] and high < upper 
+bool lower_trigger = low[1] == lower[1] and low > lower
+
+if upper_trigger
+    index_h := time[1]
+
+if lower_trigger
+    index_l := time[1]
+
+if high == upper 
+    trend := true
+
+if low == lower 
+    trend := false
+
+// Track swing changes (PROVEN PROFITABLE CONDITION)
+var float prev_swing_high = na
+var float prev_swing_low = na
+var bool swing_high_changed = false
+var bool swing_low_changed = false
+
+if not trend and trend[1]
+    line_h := line.new(index_h, upper, time, upper, color = hide_h_l ? upper_col : na, width = 2, xloc = xloc.bar_time)
+    if shadow
+        line_h1 := line.new(index_h, upper, line_h.get_x2(), upper, 
+                           color = hide_h_l ? color.new(upper_col, 70) : na, 
+                           width = shadow_width, xloc = xloc.bar_time)
+
+    line_z := line.new(index_l, line_l.get_y1(), line_h.get_x1(), upper, color = lower_col, xloc = xloc.bar_time)
+
+    swing_high_changed := true
+    prev_swing_high := upper
+
+    if not history_levels
+        line.delete(line_h[1])
+        line.delete(line_h1[1])
+else
+    swing_high_changed := false
+
+if trend and not trend[1]
+    line_l := line.new(index_l, lower, time, lower, color = hide_h_l ? lower_col : na, width = 2, xloc = xloc.bar_time)
+    if shadow
+        line_l1 := line.new(index_l, lower, time, lower, 
+                           color = hide_h_l ? color.new(lower_col,70) : na, 
+                           width = shadow_width, xloc = xloc.bar_time)
+
+    line_z := line.new(index_h, line_h.get_y1(), line_l.get_x1(), lower, color = upper_col, xloc = xloc.bar_time)
+
+    swing_low_changed := true
+    prev_swing_low := lower
+
+    if not history_levels
+        line.delete(line_l[1])
+        line.delete(line_l1[1])
+else
+    swing_low_changed := false
+
+line_z.set_style(line.style_dashed)
+
+line_l.set_x2(time)
+line_l1.set_x2(time)
+line_h.set_x2(time)
+line_h1.set_x2(time)
+
+bool cross_over  = ta.crossover(low, line_h.get_y1())
+bool cross_under = ta.crossunder(high, line_l.get_y1())
+
+if not (trend != trend[1]) and broken_levels
+    if cross_over 
+        line_h.set_style(line.style_dashed)
+        line_h.set_width(1)
+    if cross_under and barstate.isconfirmed 
+        line_l.set_style(line.style_dashed)
+        line_l.set_width(1)
+
+if barstate.islast
+    if trend != trend[1]
+        line.delete(line_up)
+        line.delete(line_dn)
+        label.delete(lbl_h)
+        label.delete(lbl_l)
+
+    if not trend != trend[1]
+        if trend
+            line_up := line.new(index_l, line_l.get_y1(), index_h, upper, 
+                               style = line.style_dashed, color = lower_col, xloc = xloc.bar_time)
+        if not trend 
+            line_dn := line.new(index_h, line_h.get_y1(), index_l, lower, 
+                               style = line.style_dashed, color = upper_col, xloc = xloc.bar_time)
+
+    if hide_h_l
+        lbl_h := label.new(bar_index, line_h.get_y1(), 
+                          str.tostring(line_h.get_y1(), "Swing H  (#,###.####)"), 
+                          style = label.style_label_left, 
+                          color = color.new(upper_col, 50), textcolor = chart.fg_color)
+
+        lbl_l := label.new(bar_index, line_l.get_y1(), 
+                          str.tostring(line_l.get_y1(), "Swing L  (#,###.####)"), 
+                          style = label.style_label_left, 
+                          color = color.new(lower_col, 50), textcolor = chart.fg_color)
+
+    label.delete(lbl_h[1])
+    label.delete(lbl_l[1])
+    line.delete(line_dn[1])
+    line.delete(line_up[1])
+
+    var tbl = table.new(position.top_right, 10, 10)
+    tbl.cell(0,0,"Swing Direction: ", text_color = chart.fg_color)
+    tbl.cell(1,0, (trend ? "⬈" : "⬊"), text_color = trend ? lower_col : upper_col, text_size = size.huge)
+
+if not hide_h_l
+    label.new(line_h.get_x1(), line_h.get_y2(), "", xloc = xloc.bar_time, color = upper_col)
+    label.new(line_l.get_x1(), line_l.get_y2(), "", xloc = xloc.bar_time, 
+              style = label.style_label_up, color = lower_col)
+
+// ═══════════════════════════════════════════════════════════════════════════
+// SECTION 3: EMA 200 TREND FILTER - ORIGINAL PROVEN LOGIC
+// ═══════════════════════════════════════════════════════════════════════════
+
+period_ema200 = input.int(200, title="EMA 200 Period", minval=1, group="EMA Settings")
+ema200 = ta.ema(close, period_ema200)
+plot(ema200, title="EMA 200", color=color.white, linewidth=3)
+
+// ═══════════════════════════════════════════════════════════════════════════
+// SECTION 4: VWAP CALCULATIONS - ORIGINAL PROVEN LOGIC
+// ═══════════════════════════════════════════════════════════════════════════
+
+var float sum_volume = 0.0
+var float sum_vp = 0.0
+
+if ta.change(time('D')) != 0
+    sum_volume := 0.0
+    sum_vp := 0.0
+
+sum_volume := sum_volume + volume
+sum_vp := sum_vp + (close * volume)
+
+vwap = sum_vp / sum_volume
+
+hide_vwap = timeframe.isdaily or timeframe.isweekly or timeframe.ismonthly or timeframe.multiplier >= 180
+
+plot(vwap, color=hide_vwap ? na : color.rgb(0,0,0, 35), linewidth=2, title="VWAP")
+
+barcolor_condition = close > vwap ? color.new(#7cb781, 0) : color.red
+barcolor(hide_vwap ? na : barcolor_condition)
+
+// Smoothed VWAP (PROVEN EXIT CONDITION)
+ema_length = input.int(10, title="EMA Length for Smoothed VWAP", minval=1, group="VWAP Settings")
+smoothed_vwap = ta.ema(vwap, ema_length)
+
+vwap_slope_up = ta.change(smoothed_vwap) > 0
+smoothed_vwap_color = vwap_slope_up ? color.rgb(32,117,35) : color.rgb(190,10,10)
+
+plot(smoothed_vwap, color=smoothed_vwap_color, linewidth=2, title="Smoothed VWAP (EMA)")
+
+// ═══════════════════════════════════════════════════════════════════════════
+// SECTION 5: RSI BAR COLORS - ORIGINAL
+// ═══════════════════════════════════════════════════════════════════════════
+
+len_rsi = input.int(14, minval=1, title="RSI Length", group="RSI Settings")
+rsi = ta.rsi(close, len_rsi)
+
+colorCond1 = input.color(color.new(#056656, 0), title="Overbought BarColor", group="RSI Settings")
+colorCond2 = input.color(color.new(#801922, 0), title="Oversold BarColor", group="RSI Settings")
+
+cond1 = rsi > 60
+barcolor(cond1 ? colorCond1 : na)
+
+cond2 = rsi < 40
+barcolor(cond2 ? colorCond2 : na)
+
+// ═══════════════════════════════════════════════════════════════════════════
+// SECTION 6: EMA RIBBONS - ORIGINAL
+// ═══════════════════════════════════════════════════════════════════════════
+
+length1_default = 72
+length2_default = 89
+length3_default = 216
+length4_default = 267
+length5_default = 360
+length6_default = 445
+
+adjust_length(length) =>
+    timeframe.isminutes and (timeframe.multiplier == 3 or timeframe.multiplier == 5) ? 
+    length / timeframe.multiplier : length
+
+length1 = adjust_length(length1_default)
+length2 = adjust_length(length2_default)
+length3 = adjust_length(length3_default)
+length4 = adjust_length(length4_default)
+length5 = adjust_length(length5_default)
+length6 = adjust_length(length6_default)
+
+ma_type1 = input.string("EMA", title="MA Type 1", options=["SMA", "EMA", "WMA", "HMA", "RMA"], 
+                        group="MA Ribbon Settings")
+ma_type2 = input.string("EMA", title="MA Type 2", options=["SMA", "EMA", "WMA", "HMA", "RMA"], 
+                        group="MA Ribbon Settings")
+ma_type3 = input.string("EMA", title="MA Type 3", options=["SMA", "EMA", "WMA", "HMA", "RMA"], 
+                        group="MA Ribbon Settings")
+ma_type4 = input.string("EMA", title="MA Type 4", options=["SMA", "EMA", "WMA", "HMA", "RMA"], 
+                        group="MA Ribbon Settings")
+ma_type5 = input.string("EMA", title="MA Type 5", options=["SMA", "EMA", "WMA", "HMA", "RMA"], 
+                        group="MA Ribbon Settings")
+ma_type6 = input.string("EMA", title="MA Type 6", options=["SMA", "EMA", "WMA", "HMA", "RMA"], 
+                        group="MA Ribbon Settings")
+
+ma(src, length, type) =>
+    if type == "SMA"
+        ta.sma(src, length)
+    else if type == "EMA"
+        ta.ema(src, length)
+    else if type == "WMA"
+        ta.wma(src, length)
+    else if type == "HMA"
+        ta.hma(src, length)
+    else if type == "RMA"
+        ta.rma(src, length)
+    else
+        na
+
+ma1 = ma(close, length1, ma_type1)
+ma2 = ma(close, length2, ma_type2)
+ma3 = ma(close, length3, ma_type3)
+ma4 = ma(close, length4, ma_type4)
+ma5 = ma(close, length5, ma_type5)
+ma6 = ma(close, length6, ma_type6)
+
+plot1 = plot(ma1, color=color.red, linewidth=2, title="MA 1", display=display.none)
+plot2 = plot(ma2, color=color.orange, linewidth=2, title="MA 2", display=display.none)
+plot3 = plot(ma3, color=color.yellow, linewidth=2, title="MA 3", display=display.none)
+plot4 = plot(ma4, color=color.green, linewidth=2, title="MA 4", display=display.none)
+plot5 = plot(ma5, color=color.blue, linewidth=2, title="MA 5", display=display.none)
+plot6 = plot(ma6, color=color.purple, linewidth=2, title="MA 6", display=display.none)
+
+fill(plot1=plot1, plot2=plot2, color=color.new(color.red, 65), title="Ribbon 1-2")
+fill(plot1=plot3, plot2=plot4, color=color.new(color.yellow, 65), title="Ribbon 3-4")
+fill(plot1=plot5, plot2=plot6, color=color.new(color.blue, 65), title="Ribbon 5-6")
+
+// ═══════════════════════════════════════════════════════════════════════════
+// SECTION 7: NEW ENHANCED FILTERS
+// ═══════════════════════════════════════════════════════════════════════════
+
+// 7.1 Volume Confirmation Filter
+volume_ma = ta.sma(volume, 20)
+volume_confirmed = use_volume_filter ? volume > volume_ma * volume_multiplier : true
+
+// 7.2 Momentum Filter
+price_change_pct = (close - close[momentum_length]) / close[momentum_length] * 100
+momentum_bullish = use_momentum_filter ? price_change_pct > momentum_threshold : true
+momentum_bearish = use_momentum_filter ? price_change_pct < -momentum_threshold : true
+
+// 7.3 ATR for Dynamic Stop-Loss/Take-Profit
+atr_length = input.int(14, "ATR Length", minval=1, group="Risk Management")
+atr = ta.atr(atr_length)
+
+// ═══════════════════════════════════════════════════════════════════════════
+// SECTION 8: TRADING LOGIC - ORIGINAL PROFITABLE CONDITIONS + ENHANCEMENTS
+// ═══════════════════════════════════════════════════════════════════════════
+
+// PROVEN BUY CONDITIONS (From Original Strategy)
+// 1. Close price above EMA 200 (Trend Filter)
+// 2. Swing low confirmed (ZigZag reversal)
+// ENHANCED WITH:
+// 3. Volume confirmation
+// 4. Momentum filter
+
+buy_condition_1 = close > ema200  // PROVEN PROFITABLE
+buy_condition_2 = swing_low_changed  // PROVEN PROFITABLE
+buy_condition_3 = volume_confirmed  // NEW ENHANCEMENT
+buy_condition_4 = momentum_bullish  // NEW ENHANCEMENT
+
+buy_signal = buy_condition_1 and buy_condition_2 and buy_condition_3 and buy_condition_4
+
+// PROVEN SELL CONDITIONS (From Original Strategy)
+// 1. Close price below EMA 200 (Trend Filter)
+// 2. Swing high confirmed (ZigZag reversal)
+// ENHANCED WITH:
+// 3. Volume confirmation
+// 4. Momentum filter
+
+sell_condition_1 = close < ema200  // PROVEN PROFITABLE
+sell_condition_2 = swing_high_changed  // PROVEN PROFITABLE
+sell_condition_3 = volume_confirmed  // NEW ENHANCEMENT
+sell_condition_4 = momentum_bearish  // NEW ENHANCEMENT
+
+sell_signal = sell_condition_1 and sell_condition_2 and sell_condition_3 and sell_condition_4
+
+// PROVEN EXIT CONDITIONS (From Original Strategy)
+close_buy_condition = ta.crossunder(close, smoothed_vwap)  // PROVEN PROFITABLE
+close_sell_condition = ta.crossover(close, smoothed_vwap)  // PROVEN PROFITABLE
+
+// ═══════════════════════════════════════════════════════════════════════════
+// SECTION 9: RISK MANAGEMENT - DYNAMIC STOPS & TARGETS
+// ═══════════════════════════════════════════════════════════════════════════
+
+// Calculate Stop-Loss and Take-Profit levels
+var float long_entry = na
+var float short_entry = na
+var float long_stop = na
+var float long_target = na
+var float short_stop = na
+var float short_target = na
+var float trailing_stop_long = na
+var float trailing_stop_short = na
+
+// Long Position Entry
+if buy_signal and strategy.position_size == 0
+    long_entry := close
+    long_stop := close - (atr * atr_stop_multiplier)
+    long_target := close + (atr * atr_stop_multiplier * risk_reward_ratio)
+    trailing_stop_long := na
+
+// Short Position Entry
+if sell_signal and strategy.position_size == 0
+    short_entry := close
+    short_stop := close + (atr * atr_stop_multiplier)
+    short_target := close - (atr * atr_stop_multiplier * risk_reward_ratio)
+    trailing_stop_short := na
+
+// Trailing Stop Logic for Long Positions
+if strategy.position_size > 0 and use_trailing_stop
+    potential_trail = close - (atr * trailing_atr_mult)
+    trailing_stop_long := na(trailing_stop_long) ? potential_trail : math.max(trailing_stop_long, potential_trail)
+
+// Trailing Stop Logic for Short Positions
+if strategy.position_size < 0 and use_trailing_stop
+    potential_trail = close + (atr * trailing_atr_mult)
+    trailing_stop_short := na(trailing_stop_short) ? potential_trail : math.min(trailing_stop_short, potential_trail)
+
+// Reset trailing stops when not in position
+if strategy.position_size == 0
+    trailing_stop_long := na
+    trailing_stop_short := na
+
+// ═══════════════════════════════════════════════════════════════════════════
+// SECTION 10: STRATEGY EXECUTION
+// ═══════════════════════════════════════════════════════════════════════════
+
+// LONG ENTRY
+if buy_signal and barstate.isconfirmed
+    strategy.entry("Long", strategy.long, comment="LONG: Swing Low + EMA200")
+
+// SHORT ENTRY
+if sell_signal and barstate.isconfirmed
+    strategy.entry("Short", strategy.short, comment="SHORT: Swing High + EMA200")
+
+// LONG EXIT - Multiple Conditions
+if strategy.position_size > 0
+    // Use trailing stop if enabled
+    active_stop = use_trailing_stop and not na(trailing_stop_long) ? trailing_stop_long : long_stop
+    
+    if use_stop_loss and use_take_profit
+        strategy.exit("Exit Long", "Long", 
+                     stop=active_stop, 
+                     limit=long_target, 
+                     comment="EXIT LONG SL/TP")
+    else if use_stop_loss
+        strategy.exit("Exit Long", "Long", 
+                     stop=active_stop, 
+                     comment="EXIT LONG SL")
+    else if use_take_profit
+        strategy.exit("Exit Long", "Long", 
+                     limit=long_target, 
+                     comment="EXIT LONG TP")
+    
+    // VWAP Exit (PROVEN PROFITABLE EXIT)
+    if close_buy_condition and barstate.isconfirmed
+        strategy.close("Long", comment="EXIT: VWAP Cross")
+
+// SHORT EXIT - Multiple Conditions
+if strategy.position_size < 0
+    // Use trailing stop if enabled
+    active_stop = use_trailing_stop and not na(trailing_stop_short) ? trailing_stop_short : short_stop
+    
+    if use_stop_loss and use_take_profit
+        strategy.exit("Exit Short", "Short", 
+                     stop=active_stop, 
+                     limit=short_target, 
+                     comment="EXIT SHORT SL/TP")
+    else if use_stop_loss
+        strategy.exit("Exit Short", "Short", 
+                     stop=active_stop, 
+                     comment="EXIT SHORT SL")
+    else if use_take_profit
+        strategy.exit("Exit Short", "Short", 
+                     limit=short_target, 
+                     comment="EXIT SHORT TP")
+    
+    // VWAP Exit (PROVEN PROFITABLE EXIT)
+    if close_sell_condition and barstate.isconfirmed
+        strategy.close("Short", comment="EXIT: VWAP Cross")
+
+// ═══════════════════════════════════════════════════════════════════════════
+// SECTION 11: VISUALIZATION - ENHANCED
+// ═══════════════════════════════════════════════════════════════════════════
+
+// Plot Entry Signals
+plotshape(buy_signal ? low : na, 'Enhanced Buy', shape.triangleup, location.belowbar, 
+          color=color.new(color.green, 0), size=size.normal, text="BUY")
+plotshape(sell_signal ? high : na, 'Enhanced Sell', shape.triangledown, location.abovebar, 
+          color=color.new(color.red, 0), size=size.normal, text="SELL")
+
+// Plot Exit Signals
+plotshape(close_buy_condition ? high : na, 'VWAP Exit Long', shape.xcross, 
+          location.absolute, color=#3AFF17, size=size.small)
+plotshape(close_sell_condition ? low : na, 'VWAP Exit Short', shape.xcross, 
+          location.absolute, color=#FD1707, size=size.small)
+
+// Plot Stop-Loss and Take-Profit Levels
+plot(strategy.position_size > 0 and use_stop_loss ? long_stop : na, 
+     "Long Stop", color=color.red, linewidth=2, style=plot.style_linebr)
+plot(strategy.position_size > 0 and use_take_profit ? long_target : na, 
+     "Long Target", color=color.lime, linewidth=2, style=plot.style_linebr)
+
+plot(strategy.position_size < 0 and use_stop_loss ? short_stop : na, 
+     "Short Stop", color=color.red, linewidth=2, style=plot.style_linebr)
+plot(strategy.position_size < 0 and use_take_profit ? short_target : na, 
+     "Short Target", color=color.lime, linewidth=2, style=plot.style_linebr)
+
+// Plot Trailing Stops
+plot(strategy.position_size > 0 and use_trailing_stop and not na(trailing_stop_long) ? 
+     trailing_stop_long : na, "Trailing Stop Long", color=color.orange, linewidth=2, 
+     style=plot.style_circles)
+
+plot(strategy.position_size < 0 and use_trailing_stop and not na(trailing_stop_short) ? 
+     trailing_stop_short : na, "Trailing Stop Short", color=color.orange, linewidth=2, 
+     style=plot.style_circles)
+
+// Volume Bars Coloring
+volume_color = volume > volume_ma * volume_multiplier ? 
+               (close > open ? color.new(color.green, 50) : color.new(color.red, 50)) : 
+               color.new(color.gray, 70)
+plot(volume, style=plot.style_columns, color=volume_color, title="Volume Confirmation")
+
+// ═══════════════════════════════════════════════════════════════════════════
+// SECTION 12: PERFORMANCE DASHBOARD
+// ═══════════════════════════════════════════════════════════════════════════
+
+var perf_table = table.new(position.bottom_right, 3, 7, border_width=1)
+
+if barstate.islast
+    // Header
+    table.cell(perf_table, 0, 0, "Indicator", text_color=color.white, bgcolor=color.navy, text_size=size.small)
+    table.cell(perf_table, 1, 0, "Value", text_color=color.white, bgcolor=color.navy, text_size=size.small)
+    table.cell(perf_table, 2, 0, "Status", text_color=color.white, bgcolor=color.navy, text_size=size.small)
+    
+    // EMA 200 Trend
+    table.cell(perf_table, 0, 1, "EMA 200 Trend", text_color=color.white, bgcolor=color.gray, text_size=size.tiny)
+    ema_trend = close > ema200 ? "BULL" : "BEAR"
+    ema_color = close > ema200 ? color.green : color.red
+    table.cell(perf_table, 1, 1, str.tostring(ema200, "#.####"), text_color=color.white, bgcolor=color.gray, text_size=size.tiny)
+    table.cell(perf_table, 2, 1, ema_trend, text_color=color.white, bgcolor=ema_color, text_size=size.tiny)
+    
+    // Swing Status
+    table.cell(perf_table, 0, 2, "Swing Status", text_color=color.white, bgcolor=color.gray, text_size=size.tiny)
+    swing_status = swing_low_changed ? "LOW ✓" : swing_high_changed ? "HIGH ✓" : "—"
+    swing_color = swing_low_changed ? color.green : swing_high_changed ? color.red : color.gray
+    table.cell(perf_table, 1, 2, swing_status, text_color=color.white, bgcolor=swing_color, text_size=size.tiny)
+    table.cell(perf_table, 2, 2, trend ? "⬈" : "⬊", text_color=trend ? color.green : color.red, bgcolor=color.gray, text_size=size.tiny)
+    
+    // Volume
+    table.cell(perf_table, 0, 3, "Volume", text_color=color.white, bgcolor=color.gray, text_size=size.tiny)
+    vol_ratio = volume / volume_ma
+    table.cell(perf_table, 1, 3, str.tostring(vol_ratio, "#.##") + "x", text_color=color.white, bgcolor=color.gray, text_size=size.tiny)
+    vol_status = volume_confirmed ? "✓" : "✗"
+    vol_color = volume_confirmed ? color.green : color.orange
+    table.cell(perf_table, 2, 3, vol_status, text_color=color.white, bgcolor=vol_color, text_size=size.tiny)
+    
+    // Momentum
+    table.cell(perf_table, 0, 4, "Momentum", text_color=color.white, bgcolor=color.gray, text_size=size.tiny)
+    table.cell(perf_table, 1, 4, str.tostring(price_change_pct, "#.##") + "%", text_color=color.white, bgcolor=color.gray, text_size=size.tiny)
+    mom_status = momentum_bullish ? "BULL ✓" : momentum_bearish ? "BEAR ✓" : "—"
+    mom_color = momentum_bullish ? color.green : momentum_bearish ? color.red : color.gray
+    table.cell(perf_table, 2, 4, mom_status, text_color=color.white, bgcolor=mom_color, text_size=size.tiny)
+    
+    // ATR
+    table.cell(perf_table, 0, 5, "ATR", text_color=color.white, bgcolor=color.gray, text_size=size.tiny)
+    table.cell(perf_table, 1, 5, str.tostring(atr, "#.####"), text_color=color.white, bgcolor=color.gray, text_size=size.tiny)
+    table.cell(perf_table, 2, 5, "—", text_color=color.white, bgcolor=color.gray, text_size=size.tiny)
+    
+    // Risk:Reward
+    table.cell(perf_table, 0, 6, "R:R Ratio", text_color=color.white, bgcolor=color.gray, text_size=size.tiny)
+    table.cell(perf_table, 1, 6, str.tostring(risk_reward_ratio, "#.#") + ":1", text_color=color.white, bgcolor=color.gray, text_size=size.tiny)
+    rr_color = risk_reward_ratio >= 2.0 ? color.green : color.orange
+    table.cell(perf_table, 2, 6, "—", text_color=color.white, bgcolor=rr_color, text_size=size.tiny)
+
+// ═══════════════════════════════════════════════════════════════════════════
+// SECTION 13: WEBHOOK ALERTS (JSON FORMAT FOR AUTOMATION)
+// ═══════════════════════════════════════════════════════════════════════════
+
+buy_alert_message = '{"symbol": "' + syminfo.ticker + 
+                    '", "action": "buy", "balance_percentage": ' + str.tostring(quantity) + 
+                    ', "leverage": ' + str.tostring(leverage) + 
+                    ', "entry": ' + str.tostring(close) + 
+                    ', "stop_loss": ' + str.tostring(long_stop) + 
+                    ', "take_profit": ' + str.tostring(long_target) + 
+                    ', "atr": ' + str.tostring(atr) + '}'
+
+sell_alert_message = '{"symbol": "' + syminfo.ticker + 
+                     '", "action": "sell", "balance_percentage": ' + str.tostring(quantity) + 
+                     ', "leverage": ' + str.tostring(leverage) + 
+                     ', "entry": ' + str.tostring(close) + 
+                     ', "stop_loss": ' + str.tostring(short_stop) + 
+                     ', "take_profit": ' + str.tostring(short_target) + 
+                     ', "atr": ' + str.tostring(atr) + '}'
+
+close_alert_message = '{"symbol": "' + syminfo.ticker + 
+                      '", "action": "close", "balance_percentage": ' + str.tostring(quantity) + 
+                      ', "leverage": ' + str.tostring(leverage) + 
+                      ', "exit": ' + str.tostring(close) + '}'
+
+// Trigger Alerts
+if buy_signal and barstate.isconfirmed
+    alert(buy_alert_message, alert.freq_once_per_bar)
+
+if sell_signal and barstate.isconfirmed
+    alert(sell_alert_message, alert.freq_once_per_bar)
+
+if (close_buy_condition or close_sell_condition) and barstate.isconfirmed
+    alert(close_alert_message, alert.freq_once_per_bar)
+
+// ═══════════════════════════════════════════════════════════════════════════
+// SECTION 14: ALERT CONDITIONS FOR TRADINGVIEW ALERTS
+// ═══════════════════════════════════════════════════════════════════════════
+
+plot(quantity, title="quantity", display=display.none)
+plot(leverage, title="leverage", display=display.none)
+
+alertcondition(buy_signal, title='Enhanced Buy Signal', 
+               message='{"symbol": "{{ticker}}", "action": "buy", "balance_percentage": {{plot("quantity")}}, "leverage": {{plot("leverage")}}, "entry": {{close}}}')
+
+alertcondition(sell_signal, title='Enhanced Sell Signal', 
+               message='{"symbol": "{{ticker}}", "action": "sell", "balance_percentage": {{plot("quantity")}}, "leverage": {{plot("leverage")}}, "entry": {{close}}}')
+
+alertcondition(close_buy_condition or close_sell_condition, title='Enhanced Close Signal', 
+               message='{"symbol": "{{ticker}}", "action": "close", "balance_percentage": {{plot("quantity")}}, "leverage": {{plot("leverage")}}, "entry": {{close}}}')
+
+plot(na, editable = false)
+
+// ═══════════════════════════════════════════════════════════════════════════
+// STRATEGY ENHANCEMENT NOTES
+// ═══════════════════════════════════════════════════════════════════════════
+// 
+// PROVEN PROFITABLE CONDITIONS (From Original):
+// ✅ Swing Low/High detection (ZigZag) for major reversals
+// ✅ EMA 200 trend filter (only long above, short below)
+// ✅ Smoothed VWAP crossover for exits
+// ✅ Multi-timeframe MA ribbons for trend confirmation
+// 
+// NEW ENHANCEMENTS FOR HIGHER PROFITABILITY:
+// ✅ Volume confirmation filter (1.2x average volume requirement)
+// ✅ Momentum filter (0.5% threshold to avoid choppy markets)
+// ✅ Dynamic ATR-based stop-loss (2.0x ATR default)
+// ✅ Risk:Reward ratio take-profit (2.5:1 default)
+// ✅ Trailing ATR-based stops to lock in profits
+// ✅ Real-time performance dashboard
+// ✅ Enhanced webhook alerts with SL/TP levels
+// 
+// RECOMMENDED SETTINGS:
+// - Timeframe: 15m, 1H, 4H (works best on higher timeframes)
+// - Pairs: BTC/USDT, ETH/USDT, high-liquidity altcoins
+// - Initial Capital: $10,000+
+// - Leverage: 1-3x (conservative), 5-10x (aggressive)
+// - Commission: 0.1% (adjust based on your exchange)
+// 
+// OPTIMIZATION TIPS:
+// 1. Increase swing_length to 150+ for cleaner swings in choppy markets
+// 2. Lower volume_multiplier to 1.0 for more signals in low-volume periods
+// 3. Increase risk_reward_ratio to 3:1 or 4:1 for trending markets
+// 4. Enable trailing stops during strong trends
+// 5. Disable momentum filter in ranging markets for more opportunities
+// 
+// ═══════════════════════════════════════════════════════════════════════════

@@ -1,0 +1,368 @@
+//@version=5
+strategy("AI Crypto Order Flow Regime Adaptive System (COFRAS)", 
+         shorttitle="COFRAS", 
+         overlay=true, 
+         initial_capital=10000,
+         default_qty_type=strategy.percent_of_equity,
+         default_qty_value=10,
+         commission_type=strategy.commission.percent,
+         commission_value=0.1,
+         slippage=3)
+
+// ══════════════════════════════════════════════════════════════════════════════
+// SECTION 1: USER INPUTS - Fully Configurable for Optimization
+// ══════════════════════════════════════════════════════════════════════════════
+
+// Order Flow Imbalance Settings
+ofi_length = input.int(14, "Order Flow Imbalance Length", minval=5, maxval=50, 
+                       tooltip="Period for calculating buying/selling pressure imbalance")
+ofi_smooth = input.int(3, "OFI Smoothing", minval=1, maxval=10,
+                       tooltip="Smoothing factor to reduce noise in order flow calculations")
+
+// Volatility Regime Settings
+atr_length = input.int(20, "ATR Length for Regime Detection", minval=10, maxval=100)
+regime_lookback = input.int(50, "Regime Classification Lookback", minval=20, maxval=200,
+                           tooltip="Historical period to classify current volatility regime")
+
+// Multi-Timeframe Trend Filter
+use_mtf_filter = input.bool(true, "Enable Multi-Timeframe Filter", 
+                           tooltip="Only trade when higher timeframes confirm direction")
+htf_timeframe = input.timeframe("240", "Higher Timeframe for Trend")
+mtf_timeframe = input.timeframe("60", "Medium Timeframe for Trend")
+trend_ma_length = input.int(50, "Trend MA Length", minval=20, maxval=200)
+
+// Entry Thresholds
+ofi_threshold = input.float(1.5, "OFI Signal Threshold", minval=0.5, maxval=5.0, step=0.1,
+                           tooltip="Minimum order flow imbalance to trigger entry")
+volume_spike = input.float(1.3, "Volume Spike Multiplier", minval=1.0, maxval=3.0, step=0.1,
+                          tooltip="Volume must be this multiple of average to confirm entry")
+
+// Risk Management
+atr_stop_mult = input.float(2.0, "ATR Stop-Loss Multiplier", minval=0.5, maxval=5.0, step=0.1)
+risk_reward = input.float(3.0, "Risk:Reward Ratio", minval=1.5, maxval=10.0, step=0.5)
+use_trailing = input.bool(true, "Use Trailing Stop", 
+                         tooltip="Trail stop-loss based on ATR")
+trailing_atr_mult = input.float(3.0, "Trailing ATR Multiplier", minval=1.0, maxval=5.0, step=0.5)
+max_bars_in_trade = input.int(100, "Max Bars in Trade", minval=10, maxval=500,
+                             tooltip="Force exit if trade hasn't closed after this many bars")
+
+// Regime-Specific Settings
+trade_in_contraction = input.bool(false, "Trade in Contraction Regime",
+                                 tooltip="Allow mean-reversion trades during low volatility")
+trade_in_expansion = input.bool(true, "Trade in Expansion Regime",
+                               tooltip="Allow breakout trades during volatility expansion")
+trade_in_trending = input.bool(true, "Trade in Trending Regime",
+                              tooltip="Allow momentum trades during strong trends")
+
+// ══════════════════════════════════════════════════════════════════════════════
+// SECTION 2: CORE CALCULATIONS - Proprietary Indicators
+// ══════════════════════════════════════════════════════════════════════════════
+
+// 2.1 Calculate Order Flow Imbalance (OFI)
+// This measures the balance between buying and selling pressure
+// Concept: Weight price changes by volume and direction to detect smart money flow
+
+calc_ofi() =>
+    // Calculate directional volume (signed by price change)
+    price_change = close - close[1]
+    directional_volume = volume * math.sign(price_change)
+    
+    // Calculate buying and selling pressure
+    buying_pressure = math.sum(directional_volume > 0 ? directional_volume : 0, ofi_length)
+    selling_pressure = math.abs(math.sum(directional_volume < 0 ? directional_volume : 0, ofi_length))
+    
+    // Normalize to prevent division by zero
+    total_pressure = buying_pressure + selling_pressure
+    normalized_ofi = total_pressure > 0 ? (buying_pressure - selling_pressure) / total_pressure * 100 : 0
+    
+    // Apply smoothing
+    ta.ema(normalized_ofi, ofi_smooth)
+
+ofi = calc_ofi()
+
+// 2.2 Calculate Volatility-Weighted OFI
+// Normalize OFI by current volatility to identify significant imbalances
+atr = ta.atr(atr_length)
+atr_ma = ta.sma(atr, regime_lookback)
+volatility_ratio = atr_ma > 0 ? atr / atr_ma : 1
+
+// Scale OFI by volatility - in high vol, we need stronger signals
+ofi_normalized = ofi / math.sqrt(volatility_ratio)
+
+// 2.3 Volatility Regime Classification
+// Classify market into 4 regimes based on ATR and price momentum
+
+calc_regime() =>
+    atr_percentile = ta.percentrank(atr, regime_lookback)
+    price_momentum = (close - close[20]) / close[20] * 100
+    momentum_strength = math.abs(price_momentum)
+    
+    regime = ""
+    regime_code = 0
+    
+    if atr_percentile < 30
+        regime := "Contraction"  // Low volatility - potential squeeze
+        regime_code := 1
+    else if atr_percentile > 70 and momentum_strength < 5
+        regime := "Expansion"    // High volatility - breakout potential
+        regime_code := 2
+    else if atr_percentile > 50 and price_momentum > 5
+        regime := "Bull Momentum"  // Trending up with volatility
+        regime_code := 3
+    else if atr_percentile > 50 and price_momentum < -5
+        regime := "Bear Momentum"  // Trending down with volatility
+        regime_code := 4
+    else
+        regime := "Neutral"
+        regime_code := 0
+    
+    [regime, regime_code]
+
+[current_regime, regime_code] = calc_regime()
+
+// 2.4 Smart Money Divergence Detection
+// Detect when price makes new highs/lows but OFI doesn't confirm
+
+lookback_divergence = 14
+price_high = ta.highest(high, lookback_divergence)
+price_low = ta.lowest(low, lookback_divergence)
+ofi_high = ta.highest(ofi, lookback_divergence)
+ofi_low = ta.lowest(ofi, lookback_divergence)
+
+// Bearish divergence: price makes higher high, but OFI makes lower high
+bearish_div = high == price_high and ofi < ofi_high[1] and ofi_high[1] == ta.highest(ofi[1], lookback_divergence-1)
+
+// Bullish divergence: price makes lower low, but OFI makes higher low
+bullish_div = low == price_low and ofi > ofi_low[1] and ofi_low[1] == ta.lowest(ofi[1], lookback_divergence-1)
+
+// 2.5 Volume Confirmation
+volume_ma = ta.sma(volume, 20)
+volume_confirmed = volume > volume_ma * volume_spike
+
+// 2.6 Multi-Timeframe Trend Filter
+// Request higher timeframe data
+
+htf_close = request.security(syminfo.tickerid, htf_timeframe, close)
+mtf_close = request.security(syminfo.tickerid, mtf_timeframe, close)
+
+htf_ma = ta.ema(htf_close, trend_ma_length)
+mtf_ma = ta.ema(mtf_close, trend_ma_length)
+
+htf_bullish = htf_close > htf_ma
+mtf_bullish = mtf_close > mtf_ma
+
+htf_bearish = htf_close < htf_ma
+mtf_bearish = mtf_close < mtf_ma
+
+// Multi-timeframe alignment
+mtf_aligned_long = use_mtf_filter ? (htf_bullish and mtf_bullish) : true
+mtf_aligned_short = use_mtf_filter ? (htf_bearish and mtf_bearish) : true
+
+// ══════════════════════════════════════════════════════════════════════════════
+// SECTION 3: ENTRY LOGIC - Regime-Specific Rules
+// ══════════════════════════════════════════════════════════════════════════════
+
+// 3.1 Contraction Regime Strategy (Mean Reversion)
+contraction_long = regime_code == 1 and ofi_normalized < -ofi_threshold and 
+                   close < ta.sma(close, 20) - atr and volume_confirmed
+
+contraction_short = regime_code == 1 and ofi_normalized > ofi_threshold and 
+                    close > ta.sma(close, 20) + atr and volume_confirmed
+
+// 3.2 Expansion Regime Strategy (Breakout)
+expansion_long = regime_code == 2 and ofi_normalized > ofi_threshold and 
+                 close > ta.highest(high[1], 10) and volume_confirmed
+
+expansion_short = regime_code == 2 and ofi_normalized < -ofi_threshold and 
+                  close < ta.lowest(low[1], 10) and volume_confirmed
+
+// 3.3 Trending Regime Strategy (Momentum + OFI Confirmation)
+trending_long = (regime_code == 3 or regime_code == 4) and 
+                ofi_normalized > ofi_threshold and 
+                close > ta.ema(close, 20) and 
+                bullish_div and volume_confirmed
+
+trending_short = (regime_code == 3 or regime_code == 4) and 
+                 ofi_normalized < -ofi_threshold and 
+                 close < ta.ema(close, 20) and 
+                 bearish_div and volume_confirmed
+
+// 3.4 Combine Entry Conditions Based on Enabled Regimes
+long_condition = mtf_aligned_long and
+                 ((trade_in_contraction and contraction_long) or
+                  (trade_in_expansion and expansion_long) or
+                  (trade_in_trending and trending_long))
+
+short_condition = mtf_aligned_short and
+                  ((trade_in_contraction and contraction_short) or
+                   (trade_in_expansion and expansion_short) or
+                   (trade_in_trending and trending_short))
+
+// ══════════════════════════════════════════════════════════════════════════════
+// SECTION 4: RISK MANAGEMENT - Dynamic Stops & Targets
+// ══════════════════════════════════════════════════════════════════════════════
+
+// Track entry price and bars in trade
+var float entry_price = na
+var int bars_in_trade = 0
+
+// Update bars counter
+if strategy.position_size != 0
+    bars_in_trade += 1
+else
+    bars_in_trade := 0
+    entry_price := na
+
+// Calculate dynamic stop-loss and take-profit levels
+long_stop = close - atr * atr_stop_mult
+long_target = close + (atr * atr_stop_mult * risk_reward)
+
+short_stop = close + atr * atr_stop_mult
+short_target = close - (atr * atr_stop_mult * risk_reward)
+
+// Trailing stop logic
+var float trailing_stop = na
+
+if strategy.position_size > 0 and use_trailing
+    potential_trailing = close - atr * trailing_atr_mult
+    trailing_stop := na(trailing_stop) ? potential_trailing : math.max(trailing_stop, potential_trailing)
+else if strategy.position_size < 0 and use_trailing
+    potential_trailing = close + atr * trailing_atr_mult
+    trailing_stop := na(trailing_stop) ? potential_trailing : math.min(trailing_stop, potential_trailing)
+else
+    trailing_stop := na
+
+// Time-based exit
+time_exit = bars_in_trade >= max_bars_in_trade
+
+// ══════════════════════════════════════════════════════════════════════════════
+// SECTION 5: STRATEGY EXECUTION
+// ══════════════════════════════════════════════════════════════════════════════
+
+// Entry Orders
+if long_condition and strategy.position_size == 0
+    strategy.entry("Long", strategy.long, comment="LONG: " + current_regime)
+    entry_price := close
+    trailing_stop := na
+
+if short_condition and strategy.position_size == 0
+    strategy.entry("Short", strategy.short, comment="SHORT: " + current_regime)
+    entry_price := close
+    trailing_stop := na
+
+// Exit Orders - Long Positions
+if strategy.position_size > 0
+    // Use trailing stop if enabled, otherwise use fixed stop
+    stop_level = use_trailing and not na(trailing_stop) ? trailing_stop : long_stop
+    
+    strategy.exit("Exit Long", "Long", 
+                  stop=stop_level, 
+                  limit=long_target,
+                  comment="EXIT LONG")
+    
+    // Time-based exit
+    if time_exit
+        strategy.close("Long", comment="Time Exit")
+
+// Exit Orders - Short Positions
+if strategy.position_size < 0
+    // Use trailing stop if enabled, otherwise use fixed stop
+    stop_level = use_trailing and not na(trailing_stop) ? trailing_stop : short_stop
+    
+    strategy.exit("Exit Short", "Short", 
+                  stop=stop_level, 
+                  limit=short_target,
+                  comment="EXIT SHORT")
+    
+    // Time-based exit
+    if time_exit
+        strategy.close("Short", comment="Time Exit")
+
+// ══════════════════════════════════════════════════════════════════════════════
+// SECTION 6: VISUALIZATION - Professional Chart Overlay
+// ══════════════════════════════════════════════════════════════════════════════
+
+// 6.1 Regime Background Colors
+regime_color = regime_code == 1 ? color.new(color.blue, 95) :
+               regime_code == 2 ? color.new(color.orange, 95) :
+               regime_code == 3 ? color.new(color.green, 95) :
+               regime_code == 4 ? color.new(color.red, 95) : 
+               color.new(color.gray, 98)
+
+bgcolor(regime_color, title="Regime Background")
+
+// 6.2 Plot Order Flow Imbalance (as histogram in separate pane would be ideal, 
+//     but we'll use a line overlay for now)
+hline(0, "Zero Line", color=color.gray, linestyle=hline.style_dotted)
+plot(ofi_normalized, "OFI Normalized", color=ofi_normalized > 0 ? color.green : color.red, 
+     linewidth=2, style=plot.style_histogram)
+
+// 6.3 Plot Entry/Exit Signals
+plotshape(long_condition, "Long Signal", shape.triangleup, location.belowbar, 
+          color.new(color.green, 0), size=size.small, text="LONG")
+plotshape(short_condition, "Short Signal", shape.triangledown, location.abovebar, 
+          color.new(color.red, 0), size=size.small, text="SHORT")
+
+// 6.4 Plot Stop-Loss and Take-Profit Levels
+plot(strategy.position_size > 0 ? long_stop : na, "Long Stop", color.red, 
+     linewidth=1, style=plot.style_linebr)
+plot(strategy.position_size > 0 ? long_target : na, "Long Target", color.green, 
+     linewidth=1, style=plot.style_linebr)
+plot(strategy.position_size < 0 ? short_stop : na, "Short Stop", color.red, 
+     linewidth=1, style=plot.style_linebr)
+plot(strategy.position_size < 0 ? short_target : na, "Short Target", color.green, 
+     linewidth=1, style=plot.style_linebr)
+
+// 6.5 Plot Trailing Stop
+plot(use_trailing and not na(trailing_stop) ? trailing_stop : na, "Trailing Stop", 
+     color.orange, linewidth=2, style=plot.style_cross)
+
+// 6.6 Plot Divergence Markers
+plotshape(bullish_div, "Bullish Divergence", shape.diamond, location.belowbar, 
+          color.new(color.aqua, 30), size=size.tiny, text="BD")
+plotshape(bearish_div, "Bearish Divergence", shape.diamond, location.abovebar, 
+          color.new(color.fuchsia, 30), size=size.tiny, text="BD")
+
+// 6.7 Plot Multi-Timeframe Trend
+barcolor(use_mtf_filter and mtf_aligned_long ? color.new(color.green, 70) : 
+         use_mtf_filter and mtf_aligned_short ? color.new(color.red, 70) : na)
+
+// ══════════════════════════════════════════════════════════════════════════════
+// SECTION 7: PERFORMANCE MONITORING
+// ══════════════════════════════════════════════════════════════════════════════
+
+// Display current regime and OFI on chart
+var table perf_table = table.new(position.top_right, 2, 4, border_width=1)
+
+if barstate.islast
+    table.cell(perf_table, 0, 0, "Regime:", text_color=color.white, bgcolor=color.navy)
+    table.cell(perf_table, 1, 0, current_regime, text_color=color.white, bgcolor=regime_color)
+    
+    table.cell(perf_table, 0, 1, "OFI:", text_color=color.white, bgcolor=color.navy)
+    ofi_color = ofi_normalized > ofi_threshold ? color.green : 
+                ofi_normalized < -ofi_threshold ? color.red : color.gray
+    table.cell(perf_table, 1, 1, str.tostring(ofi_normalized, "#.##"), 
+               text_color=color.white, bgcolor=ofi_color)
+    
+    table.cell(perf_table, 0, 2, "Vol Ratio:", text_color=color.white, bgcolor=color.navy)
+    table.cell(perf_table, 1, 2, str.tostring(volatility_ratio, "#.##"), 
+               text_color=color.white, bgcolor=color.gray)
+    
+    table.cell(perf_table, 0, 3, "MTF Aligned:", text_color=color.white, bgcolor=color.navy)
+    mtf_status = mtf_aligned_long ? "LONG ✓" : mtf_aligned_short ? "SHORT ✓" : "✗"
+    mtf_bg = mtf_aligned_long ? color.green : mtf_aligned_short ? color.red : color.gray
+    table.cell(perf_table, 1, 3, mtf_status, text_color=color.white, bgcolor=mtf_bg)
+
+// ══════════════════════════════════════════════════════════════════════════════
+// END OF STRATEGY
+// ══════════════════════════════════════════════════════════════════════════════
+
+// Strategy Notes:
+// 1. This strategy exploits ORDER FLOW IMBALANCES - a microstructure edge
+// 2. REGIME ADAPTATION ensures different tactics for different market conditions
+// 3. SMART MONEY DIVERGENCE catches institutional accumulation/distribution
+// 4. MULTI-TIMEFRAME FILTER prevents counter-trend trades
+// 5. DYNAMIC RISK MANAGEMENT adapts to volatility
+//
+// Backtest this on: BTC/USDT, ETH/USDT (15m, 1H, 4H timeframes)
+// Optimize parameters using TradingView's Strategy Tester
