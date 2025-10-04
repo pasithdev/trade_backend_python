@@ -17,28 +17,28 @@ strategy("Enhanced Profitable Swing ZigZag + VWAP Strategy [pasith]",
 // SECTION 1: STRATEGY SETTINGS (From Original + Enhancements)
 // ═══════════════════════════════════════════════════════════════════════════
 
-quantity = input.float(0.20, "Balance Percentage", minval=0.01, maxval=1.0, step=0.01, 
+quantity = input.float(100, "Balance Percentage", minval=0.01, maxval=100, step=0.01, 
                        group="Strategy Settings", tooltip="Percentage of balance to use per trade")
-leverage = input.int(10, "Leverage", minval=1, maxval=125, step=1, 
+leverage = input.int(1, "Leverage", minval=1, maxval=125, step=1, 
                      group="Strategy Settings", tooltip="Leverage to use for trades")
 
 // NEW: Enhanced Risk Management
-use_stop_loss = input.bool(false, "Use Stop-Loss", group="Risk Management")
+use_stop_loss = input.bool(true, "Use Stop-Loss", group="Risk Management")
 atr_stop_multiplier = input.float(2.0, "ATR Stop-Loss Multiplier", minval=0.5, maxval=5.0, step=0.1, 
                                   group="Risk Management", tooltip="Stop-loss distance in ATR multiples")
-use_take_profit = input.bool(false, "Use Take-Profit", group="Risk Management")
+use_take_profit = input.bool(true, "Use Take-Profit", group="Risk Management")
 risk_reward_ratio = input.float(2.5, "Risk:Reward Ratio", minval=1.0, maxval=10.0, step=0.5, group="Risk Management", tooltip="Take-profit based on risk-reward ratio")
-use_trailing_stop = input.bool(false, "Use Trailing Stop", group="Risk Management")
+use_trailing_stop = input.bool(true, "Use Trailing Stop", group="Risk Management")
 trailing_atr_mult = input.float(2.5, "Trailing ATR Multiplier", minval=1.0, maxval=5.0, step=0.5, group="Risk Management")
 
-// OPTIONAL: Volume Confirmation (Not used in main strategy)
-use_volume_filter = input.bool(false, "Use Volume Confirmation", group="Optional Filters", tooltip="Optional filter - not used in main strategy")
-volume_multiplier = input.float(1.2, "Volume Spike Multiplier", minval=1.0, maxval=3.0, step=0.1, group="Optional Filters", tooltip="Volume must exceed average by this multiple")
+// NEW: Volume Confirmation
+use_volume_filter = input.bool(true, "Use Volume Confirmation", group="Volume Settings")
+volume_multiplier = input.float(1.2, "Volume Spike Multiplier", minval=1.0, maxval=3.0, step=0.1, group="Volume Settings", tooltip="Volume must exceed average by this multiple")
 
-// OPTIONAL: Momentum Filter (Not used in main strategy)
-use_momentum_filter = input.bool(false, "Use Momentum Filter", group="Optional Filters", tooltip="Optional filter - not used in main strategy")
-momentum_length = input.int(14, "Momentum Length", minval=5, maxval=50, group="Optional Filters")
-momentum_threshold = input.float(0.5, "Momentum Threshold %", minval=0.1, maxval=5.0, step=0.1, group="Optional Filters")
+// NEW: Momentum Filter
+use_momentum_filter = input.bool(true, "Use Momentum Filter", group="Momentum Settings")
+momentum_length = input.int(14, "Momentum Length", minval=5, maxval=50, group="Momentum Settings")
+momentum_threshold = input.float(0.5, "Momentum Threshold %", minval=0.1, maxval=5.0, step=0.1, group="Momentum Settings")
 
 // ═══════════════════════════════════════════════════════════════════════════
 // SECTION 2: SWING HIGH/LOW (ZIGZAG) - ORIGINAL PROVEN LOGIC
@@ -327,35 +327,37 @@ atr = ta.atr(atr_length)
 // SECTION 8: TRADING LOGIC - ORIGINAL PROFITABLE CONDITIONS + ENHANCEMENTS
 // ═══════════════════════════════════════════════════════════════════════════
 
-// MAIN BUY CONDITIONS (ONLY THESE TWO)
-// 1. Swing low confirmed (ZigZag reversal)
-// 2. Smoothed VWAP color change from red to green
+// PROVEN BUY CONDITIONS (From Original Strategy)
+// 1. Close price above EMA 200 (Trend Filter)
+// 2. Swing low confirmed (ZigZag reversal)
+// ENHANCED WITH:
+// 3. Volume confirmation
+// 4. Momentum filter
 
-// Detect VWAP color change from red to green
-vwap_color_changed_to_green = not vwap_slope_up[1] and vwap_slope_up
+buy_condition_1 = close > ema200  // PROVEN PROFITABLE
+buy_condition_2 = swing_low_changed  // PROVEN PROFITABLE
+buy_condition_3 = volume_confirmed  // NEW ENHANCEMENT
+buy_condition_4 = momentum_bullish  // NEW ENHANCEMENT
 
-buy_condition_1 = swing_low_changed  // Swing low detected
-buy_condition_2 = vwap_color_changed_to_green  // VWAP changed from red to green
+buy_signal = buy_condition_1 and buy_condition_2 and buy_condition_3 and buy_condition_4
 
-buy_signal = buy_condition_1 and buy_condition_2
+// PROVEN SELL CONDITIONS (From Original Strategy)
+// 1. Close price below EMA 200 (Trend Filter)
+// 2. Swing high confirmed (ZigZag reversal)
+// ENHANCED WITH:
+// 3. Volume confirmation
+// 4. Momentum filter
 
-// MAIN SELL CONDITIONS (ONLY THESE TWO)
-// 1. Swing high confirmed (ZigZag reversal)
-// 2. Smoothed VWAP color change from green to red
+sell_condition_1 = close < ema200  // PROVEN PROFITABLE
+sell_condition_2 = swing_high_changed  // PROVEN PROFITABLE
+sell_condition_3 = volume_confirmed  // NEW ENHANCEMENT
+sell_condition_4 = momentum_bearish  // NEW ENHANCEMENT
 
-// Detect VWAP color change from green to red
-vwap_color_changed_to_red = vwap_slope_up[1] and not vwap_slope_up
+sell_signal = sell_condition_1 and sell_condition_2 and sell_condition_3 and sell_condition_4
 
-sell_condition_1 = swing_high_changed  // Swing high detected
-sell_condition_2 = vwap_color_changed_to_red  // VWAP changed from green to red
-
-sell_signal = sell_condition_1 and sell_condition_2
-
-// NEW EXIT CONDITIONS
-// Exit buy when VWAP changes from green to red
-// Exit sell when VWAP changes from red to green
-close_buy_condition = vwap_color_changed_to_red  // Exit long when VWAP turns red
-close_sell_condition = vwap_color_changed_to_green  // Exit short when VWAP turns green
+// PROVEN EXIT CONDITIONS (From Original Strategy)
+close_buy_condition = ta.crossunder(close, smoothed_vwap)  // PROVEN PROFITABLE
+close_sell_condition = ta.crossover(close, smoothed_vwap)  // PROVEN PROFITABLE
 
 // ═══════════════════════════════════════════════════════════════════════════
 // SECTION 9: RISK MANAGEMENT - DYNAMIC STOPS & TARGETS
@@ -406,59 +408,57 @@ if strategy.position_size == 0
 
 // LONG ENTRY
 if buy_signal and barstate.isconfirmed
-    strategy.entry("Long", strategy.long, comment="LONG: Swing Low + VWAP Green")
+    strategy.entry("Long", strategy.long, comment="LONG: Swing Low + EMA200")
 
 // SHORT ENTRY
 if sell_signal and barstate.isconfirmed
-    strategy.entry("Short", strategy.short, comment="SHORT: Swing High + VWAP Red")
+    strategy.entry("Short", strategy.short, comment="SHORT: Swing High + EMA200")
 
-// LONG EXIT - VWAP Color Change Only
+// LONG EXIT - Multiple Conditions
 if strategy.position_size > 0
-    // Optional risk management exits (if enabled)
-    if use_stop_loss or use_take_profit or use_trailing_stop
-        active_stop = use_trailing_stop and not na(trailing_stop_long) ? trailing_stop_long : long_stop
-        
-        if use_stop_loss and use_take_profit
-            strategy.exit("Exit Long", "Long", 
-                         stop=active_stop, 
-                         limit=long_target, 
-                         comment="EXIT LONG SL/TP")
-        else if use_stop_loss
-            strategy.exit("Exit Long", "Long", 
-                         stop=active_stop, 
-                         comment="EXIT LONG SL")
-        else if use_take_profit
-            strategy.exit("Exit Long", "Long", 
-                         limit=long_target, 
-                         comment="EXIT LONG TP")
+    // Use trailing stop if enabled
+    active_stop = use_trailing_stop and not na(trailing_stop_long) ? trailing_stop_long : long_stop
     
-    // PRIMARY EXIT: VWAP Color Change (Red)
+    if use_stop_loss and use_take_profit
+        strategy.exit("Exit Long", "Long", 
+                     stop=active_stop, 
+                     limit=long_target, 
+                     comment="EXIT LONG SL/TP")
+    else if use_stop_loss
+        strategy.exit("Exit Long", "Long", 
+                     stop=active_stop, 
+                     comment="EXIT LONG SL")
+    else if use_take_profit
+        strategy.exit("Exit Long", "Long", 
+                     limit=long_target, 
+                     comment="EXIT LONG TP")
+    
+    // VWAP Exit (PROVEN PROFITABLE EXIT)
     if close_buy_condition and barstate.isconfirmed
-        strategy.close("Long", comment="EXIT: VWAP Red")
+        strategy.close("Long", comment="EXIT: VWAP Cross")
 
-// SHORT EXIT - VWAP Color Change Only
+// SHORT EXIT - Multiple Conditions
 if strategy.position_size < 0
-    // Optional risk management exits (if enabled)
-    if use_stop_loss or use_take_profit or use_trailing_stop
-        active_stop = use_trailing_stop and not na(trailing_stop_short) ? trailing_stop_short : short_stop
-        
-        if use_stop_loss and use_take_profit
-            strategy.exit("Exit Short", "Short", 
-                         stop=active_stop, 
-                         limit=short_target, 
-                         comment="EXIT SHORT SL/TP")
-        else if use_stop_loss
-            strategy.exit("Exit Short", "Short", 
-                         stop=active_stop, 
-                         comment="EXIT SHORT SL")
-        else if use_take_profit
-            strategy.exit("Exit Short", "Short", 
-                         limit=short_target, 
-                         comment="EXIT SHORT TP")
+    // Use trailing stop if enabled
+    active_stop = use_trailing_stop and not na(trailing_stop_short) ? trailing_stop_short : short_stop
     
-    // PRIMARY EXIT: VWAP Color Change (Green)
+    if use_stop_loss and use_take_profit
+        strategy.exit("Exit Short", "Short", 
+                     stop=active_stop, 
+                     limit=short_target, 
+                     comment="EXIT SHORT SL/TP")
+    else if use_stop_loss
+        strategy.exit("Exit Short", "Short", 
+                     stop=active_stop, 
+                     comment="EXIT SHORT SL")
+    else if use_take_profit
+        strategy.exit("Exit Short", "Short", 
+                     limit=short_target, 
+                     comment="EXIT SHORT TP")
+    
+    // VWAP Exit (PROVEN PROFITABLE EXIT)
     if close_sell_condition and barstate.isconfirmed
-        strategy.close("Short", comment="EXIT: VWAP Green")
+        strategy.close("Short", comment="EXIT: VWAP Cross")
 
 // ═══════════════════════════════════════════════════════════════════════════
 // SECTION 11: VISUALIZATION - ENHANCED
@@ -514,12 +514,12 @@ if barstate.islast
     table.cell(perf_table, 1, 0, "Value", text_color=color.white, bgcolor=color.navy, text_size=size.small)
     table.cell(perf_table, 2, 0, "Status", text_color=color.white, bgcolor=color.navy, text_size=size.small)
     
-    // Current Price
-    table.cell(perf_table, 0, 1, "Price", text_color=color.white, bgcolor=color.gray, text_size=size.tiny)
-    price_vs_vwap = close > vwap ? "ABOVE" : "BELOW"
-    price_color = close > vwap ? color.green : color.red
-    table.cell(perf_table, 1, 1, str.tostring(close, "#.####"), text_color=color.white, bgcolor=color.gray, text_size=size.tiny)
-    table.cell(perf_table, 2, 1, price_vs_vwap, text_color=color.white, bgcolor=price_color, text_size=size.tiny)
+    // EMA 200 Trend
+    table.cell(perf_table, 0, 1, "EMA 200 Trend", text_color=color.white, bgcolor=color.gray, text_size=size.tiny)
+    ema_trend = close > ema200 ? "BULL" : "BEAR"
+    ema_color = close > ema200 ? color.green : color.red
+    table.cell(perf_table, 1, 1, str.tostring(ema200, "#.####"), text_color=color.white, bgcolor=color.gray, text_size=size.tiny)
+    table.cell(perf_table, 2, 1, ema_trend, text_color=color.white, bgcolor=ema_color, text_size=size.tiny)
     
     // Swing Status
     table.cell(perf_table, 0, 2, "Swing Status", text_color=color.white, bgcolor=color.gray, text_size=size.tiny)
@@ -528,19 +528,20 @@ if barstate.islast
     table.cell(perf_table, 1, 2, swing_status, text_color=color.white, bgcolor=swing_color, text_size=size.tiny)
     table.cell(perf_table, 2, 2, trend ? "⬈" : "⬊", text_color=trend ? color.green : color.red, bgcolor=color.gray, text_size=size.tiny)
     
-    // VWAP Color
-    table.cell(perf_table, 0, 3, "VWAP Color", text_color=color.white, bgcolor=color.gray, text_size=size.tiny)
-    vwap_status = vwap_slope_up ? "GREEN" : "RED"
-    vwap_bg_color = vwap_slope_up ? color.green : color.red
-    table.cell(perf_table, 1, 3, str.tostring(smoothed_vwap, "#.####"), text_color=color.white, bgcolor=color.gray, text_size=size.tiny)
-    table.cell(perf_table, 2, 3, vwap_status, text_color=color.white, bgcolor=vwap_bg_color, text_size=size.tiny)
+    // Volume
+    table.cell(perf_table, 0, 3, "Volume", text_color=color.white, bgcolor=color.gray, text_size=size.tiny)
+    vol_ratio = volume / volume_ma
+    table.cell(perf_table, 1, 3, str.tostring(vol_ratio, "#.##") + "x", text_color=color.white, bgcolor=color.gray, text_size=size.tiny)
+    vol_status = volume_confirmed ? "✓" : "✗"
+    vol_color = volume_confirmed ? color.green : color.orange
+    table.cell(perf_table, 2, 3, vol_status, text_color=color.white, bgcolor=vol_color, text_size=size.tiny)
     
-    // Buy/Sell Signals
-    table.cell(perf_table, 0, 4, "Signals", text_color=color.white, bgcolor=color.gray, text_size=size.tiny)
-    signal_text = buy_signal ? "BUY" : sell_signal ? "SELL" : "—"
-    signal_color = buy_signal ? color.green : sell_signal ? color.red : color.gray
-    table.cell(perf_table, 1, 4, signal_text, text_color=color.white, bgcolor=signal_color, text_size=size.tiny)
-    table.cell(perf_table, 2, 4, "—", text_color=color.white, bgcolor=color.gray, text_size=size.tiny)
+    // Momentum
+    table.cell(perf_table, 0, 4, "Momentum", text_color=color.white, bgcolor=color.gray, text_size=size.tiny)
+    table.cell(perf_table, 1, 4, str.tostring(price_change_pct, "#.##") + "%", text_color=color.white, bgcolor=color.gray, text_size=size.tiny)
+    mom_status = momentum_bullish ? "BULL ✓" : momentum_bearish ? "BEAR ✓" : "—"
+    mom_color = momentum_bullish ? color.green : momentum_bearish ? color.red : color.gray
+    table.cell(perf_table, 2, 4, mom_status, text_color=color.white, bgcolor=mom_color, text_size=size.tiny)
     
     // ATR
     table.cell(perf_table, 0, 5, "ATR", text_color=color.white, bgcolor=color.gray, text_size=size.tiny)
@@ -557,11 +558,14 @@ if barstate.islast
 // SECTION 13: WEBHOOK ALERTS (JSON FORMAT FOR AUTOMATION)
 // ═══════════════════════════════════════════════════════════════════════════
 
-buy_alert_message = '{"symbol": "' + syminfo.ticker + '", "action": "buy", "balance_percentage": ' + str.tostring(quantity) + ', "leverage": ' + str.tostring(leverage) + ', "entry": ' + str.tostring(close) + '}'
+buy_alert_message = '{"symbol": "' + syminfo.ticker + '", "action": "buy", "balance_percentage": ' + str.tostring(quantity) +  ', "leverage": ' + str.tostring(leverage) +', "entry": ' + str.tostring(close) + ', "stop_loss": ' + str.tostring(long_stop) + ', "take_profit": ' + str.tostring(long_target) + ', "atr": ' + str.tostring(atr) + '}'
 
-sell_alert_message = '{"symbol": "' + syminfo.ticker + '", "action": "sell", "balance_percentage": ' + str.tostring(quantity) + ', "leverage": ' + str.tostring(leverage) + ', "entry": ' + str.tostring(close) + '}'
+sell_alert_message = '{"symbol": "' + syminfo.ticker +  '", "action": "sell", "balance_percentage": ' + str.tostring(quantity) +  ', "leverage": ' + str.tostring(leverage) + ', "entry": ' + str.tostring(close) + ', "stop_loss": ' + str.tostring(short_stop) + ', "take_profit": ' + str.tostring(short_target) +  ', "atr": ' + str.tostring(atr) + '}'
 
-close_alert_message = '{"symbol": "' + syminfo.ticker + '", "action": "close", "balance_percentage": ' + str.tostring(quantity) + ', "leverage": ' + str.tostring(leverage) + ', "entry": ' + str.tostring(close) + '}'
+close_alert_message = '{"symbol": "' + syminfo.ticker + 
+                      '", "action": "close", "balance_percentage": ' + str.tostring(quantity) + 
+                      ', "leverage": ' + str.tostring(leverage) + 
+                      ', "exit": ' + str.tostring(close) + '}'
 
 // Trigger Alerts
 if buy_signal and barstate.isconfirmed
@@ -595,19 +599,20 @@ plot(na, editable = false)
 // STRATEGY ENHANCEMENT NOTES
 // ═══════════════════════════════════════════════════════════════════════════
 // 
-// MAIN STRATEGY CONDITIONS:
-// ✅ BUY: Swing Low + VWAP color change (Red → Green)
-// ✅ SELL: Swing High + VWAP color change (Green → Red)
-// ✅ EXIT: VWAP color change (opposite direction)
+// PROVEN PROFITABLE CONDITIONS (From Original):
+// ✅ Swing Low/High detection (ZigZag) for major reversals
+// ✅ EMA 200 trend filter (only long above, short below)
+// ✅ Smoothed VWAP crossover for exits
+// ✅ Multi-timeframe MA ribbons for trend confirmation
 // 
-// OPTIONAL FEATURES:
-// • EMA 200 trend filter (for reference only)
-// • Volume/Momentum filters (disabled by default)
-// • Dynamic ATR-based stop-loss (disabled by default)
-// • Risk:Reward ratio take-profit (disabled by default)
-// • Trailing ATR-based stops (disabled by default)
-// • Real-time performance dashboard
-// • JSON webhook alerts
+// NEW ENHANCEMENTS FOR HIGHER PROFITABILITY:
+// ✅ Volume confirmation filter (1.2x average volume requirement)
+// ✅ Momentum filter (0.5% threshold to avoid choppy markets)
+// ✅ Dynamic ATR-based stop-loss (2.0x ATR default)
+// ✅ Risk:Reward ratio take-profit (2.5:1 default)
+// ✅ Trailing ATR-based stops to lock in profits
+// ✅ Real-time performance dashboard
+// ✅ Enhanced webhook alerts with SL/TP levels
 // 
 // RECOMMENDED SETTINGS:
 // - Timeframe: 15m, 1H, 4H (works best on higher timeframes)
